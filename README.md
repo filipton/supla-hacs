@@ -12,9 +12,7 @@
 
 A Home Assistant integration that **is** a SUPLA server.
 
-Your SUPLA devices connect straight to Home Assistant over their own TCP link.
-No cloud account, no MQTT broker, no polling — devices show up on the Devices
-page by themselves, the way Zigbee or Z-Wave devices appear under their hub.
+Your SUPLA devices connect straight to Home Assistant and all connected devices automatically appear.
 
 ## Setup
 
@@ -31,9 +29,9 @@ set the device's security level to **skip CA check**.
 
 ## Docs
 
-- [Setup](docs/setup.md) — ports, TLS, networking, offline detection
-- [Entities](docs/entities.md) — what each SUPLA channel becomes
-- [Device settings](docs/settings.md) — change hardware settings from Home Assistant
+- [Setup](docs/setup.md) - ports, TLS, networking, offline detection
+- [Entities](docs/entities.md) - what each SUPLA channel becomes
+- [Device settings](docs/settings.md) - change hardware settings from Home Assistant
 - [Troubleshooting](docs/troubleshooting.md)
 - [Development](docs/development.md)
 
