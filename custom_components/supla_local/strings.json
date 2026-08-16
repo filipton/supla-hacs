@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SUPLA Local",
+        "description": "Home Assistant will listen for SUPLA devices itself. Point each device at {host} in its web configuration, then it appears here on its own.",
+        "data": {
+          "tcp_port": "Plain TCP port",
+          "enable_tls": "Accept TLS connections",
+          "tls_port": "TLS port"
+        },
+        "data_description": {
+          "tcp_port": "Devices with SSL turned off connect here. SUPLA's default is 2015.",
+          "enable_tls": "Uses a self-signed certificate generated on first start, so devices must be set to skip the CA check.",
+          "tls_port": "Devices with SSL turned on connect here. SUPLA's default is 2016."
+        }
+      }
+    },
+    "error": {
+      "port_in_use": "Something already listens on that port. Stop the standalone SUPLA server, or pick another port.",
+      "same_port": "The plain and TLS ports must be different."
+    },
+    "abort": {
+      "single_instance_allowed": "One SUPLA Local entry serves every device, so only one can be added."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SUPLA Local",
+        "description": "Changing a port restarts the listener. Devices are configured with a fixed address and port, so update them to match ({host}).",
+        "data": {
+          "tcp_port": "Plain TCP port",
+          "enable_tls": "Accept TLS connections",
+          "tls_port": "TLS port"
+        }
+      }
+    },
+    "error": {
+      "port_in_use": "Something already listens on that port. Stop the standalone SUPLA server, or pick another port.",
+      "same_port": "The plain and TLS ports must be different."
+    }
+  }
+}

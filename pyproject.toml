@@ -30,3 +30,5 @@ supla_server = ["web/*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Everything here talks to real sockets; a hang is a bug, not a slow test.
+timeout = 60
