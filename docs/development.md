@@ -50,19 +50,28 @@ leaving the release published.
 
 ## Nightly builds
 
-`.github/workflows/nightly.yml` rebuilds the zip on every push to `master` and
-replaces the asset on a single rolling `nightly` pre-release, so the newest
-code is always installable without cutting a release for it.
+`.github/workflows/nightly.yml` publishes a pre-release build of the latest
+code on every push to `master`, and on every published release.
 
-To use it, turn on pre-release versions for this repository in HACS, then
-**Redownload** and pick `nightly`.
+To use them, turn on pre-release versions for this repository in HACS. Updates
+then show up the same way real releases do.
 
-The build is versioned as the next patch plus a timestamp — `0.1.0` released
-becomes `0.1.1.dev202608162029` — which sorts after the release it follows and
-before the real `0.1.1`. Appending `.dev` to the released version itself would
-sort *older* than it, which is how PEP 440 pre-releases work.
+Each build gets **its own tag**, `v1.0.1.dev202608162041`. A single rolling
+`nightly` tag does not work: HACS decides what is newest by comparing tag
+names, and `nightly` is not a version, so it can never win against the last
+real release. The workflow keeps the newest five dev builds and deletes the
+rest, tags included, so the releases page stays short. Only pre-releases whose
+tag has the `X.Y.Z.devNNN` shape are ever pruned — a real release cannot match
+that pattern.
 
-Because the tag name never changes, HACS will not show an update badge for a
-new nightly; redownload it when you want the latest. If you would rather have
-update notifications, the workflow can create a uniquely tagged pre-release per
-push instead, at the cost of a tag per commit.
+The version is the next patch after the newest release, plus a timestamp:
+`v1.0.0` released gives `1.0.1.dev202608162041`, which sorts after the release
+it follows and before the eventual real `1.0.1`. Appending `.dev` to the
+released version itself would sort *older* than it, which is how PEP 440
+pre-releases work.
+
+The base is the higher of the newest real release tag and the committed
+manifest version. Previous dev tags are excluded from that calculation, or each
+build would ratchet the version up by one. The release workflow stamps the
+version into the published zip only — the manifest committed in the repository
+deliberately stays where it is, which is why the tag has to be consulted.

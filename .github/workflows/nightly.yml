@@ -3,42 +3,54 @@ name: Nightly
 on:
   push:
     branches: [master]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  # A burst of pushes only needs the last one built.
   group: nightly
   cancel-in-progress: true
 
 env:
   INTEGRATION: supla_local
+  KEEP: 5
 
 jobs:
   nightly:
-    name: Refresh the nightly zip
+    name: Publish a dev build
     runs-on: ubuntu-latest
     steps:
       - name: Check out the commit
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Stamp a build version into the manifest
+      - name: Work out the version
         id: version
         run: |
           set -euo pipefail
           MANIFEST="custom_components/${INTEGRATION}/manifest.json"
-          VERSION="$(python - "$MANIFEST" <<'PY'
-          import datetime, json, sys
+          LATEST_TAG="$(git tag --sort=-v:refname \
+            | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -n 1 || true)"
+          VERSION="$(python - "$MANIFEST" "${LATEST_TAG}" <<'PY'
+          import datetime, json, re, sys
+
+          def parts(text):
+              """The leading MAJOR.MINOR.PATCH of a version, or nothing."""
+              match = re.match(r"v?(\d+)\.(\d+)(?:\.(\d+))?$", text or "")
+              return tuple(int(g or 0) for g in match.groups()) if match else (0, 0, 0)
+
           with open(sys.argv[1]) as handle:
-              base = json.load(handle)["version"]
-          major, minor, patch = (base.split(".") + ["0", "0"])[:3]
+              manifest_version = json.load(handle)["version"]
+
+          major, minor, patch = max(parts(manifest_version), parts(sys.argv[2]))
           stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M")
-          # "A dev build of the next patch": 0.1.0 released -> 0.1.1.devNNN,
-          # which sorts after the release it follows and before the real 0.1.1.
-          # Appending .dev to the released version itself would sort *older*.
-          print(f"{major}.{minor}.{int(patch) + 1}.dev{stamp}")
+
+          print(f"{major}.{minor}.{patch + 1}.dev{stamp}")
           PY
           )"
           python - "$MANIFEST" "$VERSION" <<'PY'
@@ -52,7 +64,8 @@ jobs:
               handle.write("\n")
           PY
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Built version $VERSION"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building v$VERSION (newest release: ${LATEST_TAG:-none})"
 
       - name: Build the zip
         run: |
@@ -60,10 +73,10 @@ jobs:
           cd "custom_components/${INTEGRATION}"
           zip -r "${RUNNER_TEMP}/${INTEGRATION}.zip" . -x '*__pycache__*' '*.pyc'
 
-      - name: Replace the nightly release
+      - name: Publish it
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
           SUBJECT: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
@@ -72,11 +85,26 @@ jobs:
             "Automatic build of \`${GITHUB_SHA:0:7}\`: ${SUBJECT_LINE}" \
             "Not a supported release. Install it only if you want the newest code." \
             "Enable pre-release versions for this repository in HACS to see it.")"
-
-          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
-          gh release create nightly \
+          gh release create "${TAG}" \
             --prerelease \
             --target "${GITHUB_SHA}" \
-            --title "Nightly (${VERSION})" \
+            --title "${TAG}" \
             --notes "${NOTES}" \
             "${RUNNER_TEMP}/${INTEGRATION}.zip"
+
+      - name: Prune older dev builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+
+          gh release list --limit 200 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease) | .tagName' \
+            | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+$' \
+            | sort -Vr \
+            | tail -n "+$((KEEP + 1))" \
+            | while read -r old; do
+                echo "pruning ${old}"
+                gh release delete "${old}" --yes --cleanup-tag
+              done
