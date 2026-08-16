@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  INTEGRATION: supla_local
+
+jobs:
+  publish:
+    name: Stamp the version and publish the zip
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+
+      - name: Stamp the release version into the manifest
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+].*)?$ ]]; then
+            echo "::error::tag '$GITHUB_REF_NAME' is not a version Home Assistant will accept"
+            exit 1
+          fi
+          MANIFEST="custom_components/${INTEGRATION}/manifest.json"
+          python - "$MANIFEST" "$VERSION" <<'PY'
+          import json, sys
+          path, version = sys.argv[1], sys.argv[2]
+          with open(path) as handle:
+              manifest = json.load(handle)
+          manifest["version"] = version
+          with open(path, "w") as handle:
+              json.dump(manifest, handle, indent=2)
+              handle.write("\n")
+          print(f"{path} -> {version}")
+          PY
+
+      - name: Build the zip
+        run: |
+          set -euo pipefail
+          cd "custom_components/${INTEGRATION}"
+
+          zip -r "${RUNNER_TEMP}/${INTEGRATION}.zip" . -x '*__pycache__*' '*.pyc'
+          unzip -l "${RUNNER_TEMP}/${INTEGRATION}.zip" | tail -5
+
+      - name: Attach it to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ runner.temp }}/${{ env.INTEGRATION }}.zip

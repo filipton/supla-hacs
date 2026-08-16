@@ -1,10 +1,14 @@
-<img align="right" width="110" src="custom_components/supla_local/brand/icon.png" alt="SUPLA Local" />
+<p align="center">
+  <img src="https://raw.githubusercontent.com/filipton/supla-hacs/master/custom_components/supla_local/brand/icon.png" width="128" alt="SUPLA Local" />
+</p>
 
-# SUPLA Local
+<h1 align="center">SUPLA Local</h1>
 
-[![GitHub Release](https://img.shields.io/github/v/release/filipton/supla-hacs?style=flat-square)](https://github.com/filipton/supla-hacs/releases)
-[![GitHub Release Date](https://img.shields.io/github/release-date/filipton/supla-hacs?style=flat-square)](https://github.com/filipton/supla-hacs/releases)
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5?style=flat-square)](https://hacs.xyz/)
+<p align="center">
+  <a href="https://github.com/filipton/supla-hacs/releases"><img src="https://img.shields.io/github/v/release/filipton/supla-hacs?style=flat-square" alt="GitHub Release" /></a>
+  <a href="https://github.com/filipton/supla-hacs/releases"><img src="https://img.shields.io/github/release-date/filipton/supla-hacs?style=flat-square" alt="GitHub Release Date" /></a>
+  <a href="https://hacs.xyz/"><img src="https://img.shields.io/badge/HACS-Custom-41BDF5?style=flat-square" alt="HACS Custom" /></a>
+</p>
 
 A Home Assistant integration that **is** a SUPLA server.
 

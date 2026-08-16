@@ -1,0 +1,82 @@
+name: Nightly
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # A burst of pushes only needs the last one built.
+  group: nightly
+  cancel-in-progress: true
+
+env:
+  INTEGRATION: supla_local
+
+jobs:
+  nightly:
+    name: Refresh the nightly zip
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@v4
+
+      - name: Stamp a build version into the manifest
+        id: version
+        run: |
+          set -euo pipefail
+          MANIFEST="custom_components/${INTEGRATION}/manifest.json"
+          VERSION="$(python - "$MANIFEST" <<'PY'
+          import datetime, json, sys
+          with open(sys.argv[1]) as handle:
+              base = json.load(handle)["version"]
+          major, minor, patch = (base.split(".") + ["0", "0"])[:3]
+          stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M")
+          # "A dev build of the next patch": 0.1.0 released -> 0.1.1.devNNN,
+          # which sorts after the release it follows and before the real 0.1.1.
+          # Appending .dev to the released version itself would sort *older*.
+          print(f"{major}.{minor}.{int(patch) + 1}.dev{stamp}")
+          PY
+          )"
+          python - "$MANIFEST" "$VERSION" <<'PY'
+          import json, sys
+          path, version = sys.argv[1], sys.argv[2]
+          with open(path) as handle:
+              manifest = json.load(handle)
+          manifest["version"] = version
+          with open(path, "w") as handle:
+              json.dump(manifest, handle, indent=2)
+              handle.write("\n")
+          PY
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Built version $VERSION"
+
+      - name: Build the zip
+        run: |
+          set -euo pipefail
+          cd "custom_components/${INTEGRATION}"
+          zip -r "${RUNNER_TEMP}/${INTEGRATION}.zip" . -x '*__pycache__*' '*.pyc'
+
+      - name: Replace the nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SUBJECT: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          SUBJECT_LINE="$(printf '%s' "${SUBJECT}" | head -n 1)"
+          NOTES="$(printf '%s\n\n%s\n\n%s\n' \
+            "Automatic build of \`${GITHUB_SHA:0:7}\`: ${SUBJECT_LINE}" \
+            "Not a supported release. Install it only if you want the newest code." \
+            "Enable pre-release versions for this repository in HACS to see it.")"
+
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          gh release create nightly \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            --title "Nightly (${VERSION})" \
+            --notes "${NOTES}" \
+            "${RUNNER_TEMP}/${INTEGRATION}.zip"
