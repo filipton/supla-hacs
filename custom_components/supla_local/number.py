@@ -6,8 +6,12 @@ from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
 
-from . import SuplaConfigEntry
+from . import SuplaConfigEntry, config_map
 from .channel_map import NUMBER, EntityKey
+from .config_entity import (
+    async_setup_device_config_platform,
+    build_channel_config_entity,
+)
 from .entity import (
     AddConfigEntryEntitiesCallback,
     SuplaChannelEntity,
@@ -23,6 +27,7 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     async_setup_channel_platform(entry, NUMBER, async_add_entities, _build)
+    async_setup_device_config_platform(entry, NUMBER, async_add_entities)
 
 
 def _build(
@@ -31,6 +36,8 @@ def _build(
     channel: ChannelSnapshot,
     key: EntityKey,
 ) -> SuplaChannelEntity | None:
+    if key.role.startswith(f"{config_map.ROLE_PREFIX}-"):
+        return build_channel_config_entity(manager, device, channel, key)
     return SuplaEngineSpeedNumber(manager, device, channel, key)
 
 

@@ -191,12 +191,44 @@ class SuplaManager:
         registry.async_remove(entity_id)
 
     @callback
+    def _async_restore_config(self, device: ConnectedDevice) -> None:
+        """Hand a reconnecting device back the configuration we remember.
+
+        In SUPLA the server owns configuration: a device asks for it after
+        registering and applies whatever it is given. Nothing is pushed here,
+        only filled in, so a device that reports its own settings wins.
+        """
+        stored = self.devices.get(device.guid_hex)
+        if stored is None:
+            return
+
+        remembered = {channel.number: channel for channel in stored.channels}
+        for number, channel in device.channels.items():
+            previous = remembered.get(number)
+            if (
+                previous is None
+                or channel.config
+                or not previous.config
+                # A channel reassigned to a different function has a different
+                # struct, so the old bytes no longer mean anything.
+                or previous.function != channel.function
+            ):
+                continue
+            channel.config = previous.config
+
+        if stored.device_config and not device.device_config:
+            device.device_config = stored.device_config
+            device.device_config_fields = stored.device_config_fields
+            device.device_config_available = stored.device_config_available
+
+    @callback
     def _async_on_device_update(self, device: ConnectedDevice) -> None:
         """Registry listener: fires per device on register, value change, disconnect."""
         guid = device.guid_hex
         if device.online:
             self.last_seen[guid] = dt_util.utcnow()
 
+        self._async_restore_config(device)
         snapshot = DeviceSnapshot.from_device(device)
         previous = self.devices.get(guid)
         if previous is not None:

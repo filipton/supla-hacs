@@ -209,6 +209,63 @@ def decode_get_channel_config_request(data: bytes) -> tuple[int, int, int]:
     return channel_number, config_type, flags
 
 
+def decode_channel_config(data: bytes) -> tuple[int, int, int, bytes]:
+    """TSD_ChannelConfig -> (channel_number, func, config_type, config).
+
+    Shared by SUPLA_DS_CALL_SET_CHANNEL_CONFIG and the results of a channel
+    config exchange in either direction.
+    """
+    if len(data) < 8:
+        raise ProtocolError("short channel config")
+    channel_number, func, config_type, size = struct.unpack_from("<BiBH", data, 0)
+    return channel_number, func, config_type, data[8 : 8 + size]
+
+
+def decode_set_channel_config_result(data: bytes) -> tuple[int, int, int]:
+    """TSDS_SetChannelConfigResult -> (result, config_type, channel_number)."""
+    if len(data) < 3:
+        raise ProtocolError("short set channel config result")
+    return data[0], data[1], data[2]
+
+
+def encode_channel_config_finished(channel_number: int) -> bytes:
+    """TSD_ChannelConfigFinished: ChannelNumber."""
+    return bytes([channel_number & 0xFF])
+
+
+def decode_device_config(data: bytes) -> tuple[int, int, int, bytes]:
+    """TSDS_SetDeviceConfig -> (end_of_data, available_fields, fields, config)."""
+    if len(data) < 27:
+        raise ProtocolError("short device config")
+    end_of_data = data[0]
+    # data[1:9] is a reserved zero block.
+    available_fields, fields, size = struct.unpack_from("<QQH", data, 9)
+    return end_of_data, available_fields, fields, data[27 : 27 + size]
+
+
+def encode_device_config(
+    *,
+    available_fields: int,
+    fields: int,
+    config: bytes = b"",
+    end_of_data: bool = True,
+) -> bytes:
+    """TSDS_SetDeviceConfig, as sent by the server."""
+    return (
+        bytes([1 if end_of_data else 0])
+        + bytes(8)
+        + struct.pack("<QQH", available_fields, fields, len(config))
+        + config
+    )
+
+
+def decode_set_device_config_result(data: bytes) -> int:
+    """TSDS_SetDeviceConfigResult: Result + 9 reserved bytes."""
+    if not data:
+        raise ProtocolError("short set device config result")
+    return data[0]
+
+
 def decode_channel_extended_value(data: bytes) -> tuple[int, int, bytes]:
     """TDS_SuplaDeviceChannelExtendedValue -> (channel_number, ev_type, payload)."""
     if len(data) < 6:

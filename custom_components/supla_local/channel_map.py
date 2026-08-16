@@ -9,35 +9,41 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .const import FUNCTION_LABELS, KIND_LABELS
-from .models import ChannelSnapshot, DeviceSnapshot
-from .server import channels as K
-from .server import consts as C
-
-# Platform names, matching homeassistant.const.Platform values.
-BINARY_SENSOR = "binary_sensor"
-CLIMATE = "climate"
-COVER = "cover"
-EVENT = "event"
-LIGHT = "light"
-LOCK = "lock"
-NUMBER = "number"
-SENSOR = "sensor"
-SWITCH = "switch"
-VALVE = "valve"
-
-PLATFORMS: tuple[str, ...] = (
+from . import config_map
+from .const import (
     BINARY_SENSOR,
     CLIMATE,
     COVER,
     EVENT,
+    FUNCTION_LABELS,
+    KIND_LABELS,
     LIGHT,
     LOCK,
     NUMBER,
+    PLATFORMS,
+    SELECT,
     SENSOR,
     SWITCH,
     VALVE,
 )
+from .models import ChannelSnapshot, DeviceSnapshot
+from .server import channels as K
+from .server import consts as C
+
+__all__ = [
+    "BINARY_SENSOR",
+    "CLIMATE",
+    "COVER",
+    "EVENT",
+    "LIGHT",
+    "LOCK",
+    "NUMBER",
+    "PLATFORMS",
+    "SELECT",
+    "SENSOR",
+    "SWITCH",
+    "VALVE",
+]
 
 # Roles disambiguate several entities carved out of one channel. The empty role
 # is the channel's primary entity and keeps the bare "<guid>-<number>" id.
@@ -125,8 +131,8 @@ _SINGLE_PLATFORM_KINDS: dict[str, str] = {
 }
 
 
-def entity_keys(channel: ChannelSnapshot) -> list[EntityKey]:
-    """Entities produced by a single channel; empty when unsupported."""
+def _value_keys(channel: ChannelSnapshot) -> list[EntityKey]:
+    """Entities that read or drive the channel's value."""
     kind = channel.kind
     number = channel.number
 
@@ -170,6 +176,19 @@ def entity_keys(channel: ChannelSnapshot) -> list[EntityKey]:
     return [EntityKey(platform, number, kind)]
 
 
+def config_keys(channel: ChannelSnapshot) -> list[EntityKey]:
+    """Editable settings the channel offers, as configuration entities."""
+    return [
+        EntityKey(setting.platform, channel.number, channel.kind, setting.role)
+        for setting in config_map.channel_settings(channel)
+    ]
+
+
+def entity_keys(channel: ChannelSnapshot) -> list[EntityKey]:
+    """Entities produced by a single channel; empty when unsupported."""
+    return _value_keys(channel) + config_keys(channel)
+
+
 def device_entity_keys(device: DeviceSnapshot) -> list[EntityKey]:
     keys: list[EntityKey] = []
     for channel in device.channels:
@@ -177,10 +196,18 @@ def device_entity_keys(device: DeviceSnapshot) -> list[EntityKey]:
     return keys
 
 
+def device_config_keys(device: DeviceSnapshot) -> list[config_map.Setting]:
+    """Device-level settings this device says it supports."""
+    return list(config_map.device_settings(device))
+
+
 def device_unique_ids(device: DeviceSnapshot) -> set[str]:
     """Every unique id this device should own, including device-level ones."""
     ids = {unique_id(device.guid, CONNECTIVITY_KEY)}
     ids.update(unique_id(device.guid, key.suffix) for key in device_entity_keys(device))
+    ids.update(
+        unique_id(device.guid, setting.role) for setting in device_config_keys(device)
+    )
     return ids
 
 
@@ -196,6 +223,10 @@ _ROLE_LABELS = {
 
 def label(channel: ChannelSnapshot, key: EntityKey) -> str:
     """Entity name shown under the device, e.g. "Roller shutter 3"."""
+    if key.role.startswith(f"{config_map.ROLE_PREFIX}-"):
+        for setting in config_map.channel_settings(channel):
+            if setting.role == key.role:
+                return f"{setting.label} {channel.number}"
     if key.role in _ROLE_LABELS:
         base = _ROLE_LABELS[key.role]
     elif key.role == ROLE_PHASE:

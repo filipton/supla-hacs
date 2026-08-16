@@ -18,6 +18,34 @@ DEFAULT_ENABLE_TLS: Final = True
 
 MANUFACTURER: Final = "SUPLA"
 
+# Platform names, matching homeassistant.const.Platform values. Kept here so
+# both the channel map and the configuration map can use them without a cycle.
+BINARY_SENSOR: Final = "binary_sensor"
+CLIMATE: Final = "climate"
+COVER: Final = "cover"
+EVENT: Final = "event"
+LIGHT: Final = "light"
+LOCK: Final = "lock"
+NUMBER: Final = "number"
+SELECT: Final = "select"
+SENSOR: Final = "sensor"
+SWITCH: Final = "switch"
+VALVE: Final = "valve"
+
+PLATFORMS: Final[tuple[str, ...]] = (
+    BINARY_SENSOR,
+    CLIMATE,
+    COVER,
+    EVENT,
+    LIGHT,
+    LOCK,
+    NUMBER,
+    SELECT,
+    SENSOR,
+    SWITCH,
+    VALVE,
+)
+
 #: Sub-directory of the HA config dir holding the generated TLS key pair.
 CERT_DIRNAME: Final = DOMAIN
 

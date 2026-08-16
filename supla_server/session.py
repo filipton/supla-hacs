@@ -27,7 +27,9 @@ from .consts import (
     SUPLA_DS_CALL_GET_CHANNEL_CONFIG,
     SUPLA_DS_CALL_GET_CHANNEL_FUNCTIONS,
     SUPLA_DS_CALL_SET_CHANNEL_CONFIG,
+    SUPLA_DS_CALL_SET_CHANNEL_CONFIG_RESULT,
     SUPLA_DS_CALL_SET_DEVICE_CONFIG,
+    SUPLA_DS_CALL_SET_DEVICE_CONFIG_RESULT,
     SUPLA_DS_CALL_SET_SUBDEVICE_DETAILS,
     SUPLA_PROTO_VERSION,
     SUPLA_PROTO_VERSION_MIN,
@@ -40,23 +42,33 @@ from .consts import (
     SUPLA_SD_CALL_GET_CHANNEL_CONFIG_RESULT,
     SUPLA_SD_CALL_GET_CHANNEL_FUNCTIONS_RESULT,
     SUPLA_SD_CALL_REGISTER_DEVICE_RESULT,
+    SUPLA_CONFIG_TYPE_DEFAULT,
+    SUPLA_SD_CALL_CHANNEL_CONFIG_FINISHED,
+    SUPLA_SD_CALL_SET_CHANNEL_CONFIG,
     SUPLA_SD_CALL_SET_CHANNEL_CONFIG_RESULT,
+    SUPLA_SD_CALL_SET_DEVICE_CONFIG,
     SUPLA_SD_CALL_SET_DEVICE_CONFIG_RESULT,
 )
 from .protocol import (
     ProtocolError,
     SuplaPacket,
     decode_action_trigger,
+    decode_channel_config,
     decode_channel_extended_value,
     decode_channel_set_value_result,
     decode_channel_value_changed,
     decode_get_channel_config_request,
+    decode_device_config,
     decode_register_device,
     decode_set_activity_timeout,
+    decode_set_channel_config_result,
+    decode_set_device_config_result,
     decode_subdevice_details,
     encode_channel_config,
+    encode_channel_config_finished,
     encode_channel_functions,
     encode_channel_new_value,
+    encode_device_config,
     encode_get_version_result,
     encode_packet,
     encode_ping_result,
@@ -77,6 +89,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How long to wait for a device to accept or reject a configuration write.
+CONFIG_TIMEOUT = 10.0
+
 
 class DeviceSession:
     def __init__(
@@ -95,6 +110,10 @@ class DeviceSession:
         self._rr_counter = 1
         self.guid: bytes | None = None
         self.device: ConnectedDevice | None = None
+        # Config writes are request/response; the device answers with a result
+        # code, correlated by channel number and config type.
+        self._pending_channel_config: dict[tuple[int, int], asyncio.Future[int]] = {}
+        self._pending_device_config: asyncio.Future[int] | None = None
         peer = writer.get_extra_info("peername")
         self.peer = peer
 
@@ -127,6 +146,7 @@ class DeviceSession:
         if self._closed:
             return
         self._closed = True
+        self._abort_pending_config(ConnectionError("device disconnected"))
         await self._registry.unregister_session(self)
         try:
             self._writer.close()
@@ -168,6 +188,99 @@ class DeviceSession:
             guid_to_hex(self.guid) if self.guid else "?",
             value.hex(),
         )
+
+    async def send_channel_config(
+        self,
+        *,
+        channel_number: int,
+        func: int,
+        config_type: int,
+        config: bytes,
+        timeout: float = CONFIG_TIMEOUT,
+    ) -> int:
+        """Push a channel configuration and wait for the device's verdict."""
+        key = (channel_number, config_type)
+        future: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+        self._pending_channel_config[key] = future
+        try:
+            await self._send(
+                SuplaPacket(
+                    version=self._proto_version,
+                    rr_id=self._next_rr_id(),
+                    call_id=SUPLA_SD_CALL_SET_CHANNEL_CONFIG,
+                    data=encode_channel_config(
+                        channel_number=channel_number,
+                        function=func,
+                        config_type=config_type,
+                        config=config,
+                    ),
+                )
+            )
+            logger.info(
+                "sent channel %s config (%d bytes) to %s",
+                channel_number,
+                len(config),
+                guid_to_hex(self.guid) if self.guid else "?",
+            )
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending_channel_config.pop(key, None)
+
+    async def send_channel_config_finished(self, channel_number: int) -> None:
+        await self._send(
+            SuplaPacket(
+                version=self._proto_version,
+                rr_id=self._next_rr_id(),
+                call_id=SUPLA_SD_CALL_CHANNEL_CONFIG_FINISHED,
+                data=encode_channel_config_finished(channel_number),
+            )
+        )
+
+    async def send_device_config(
+        self,
+        *,
+        available_fields: int,
+        fields: int,
+        config: bytes,
+        timeout: float = CONFIG_TIMEOUT,
+    ) -> int:
+        """Push device-level configuration and wait for the device's verdict."""
+        future: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+        self._pending_device_config = future
+        try:
+            await self._send(
+                SuplaPacket(
+                    version=self._proto_version,
+                    rr_id=self._next_rr_id(),
+                    call_id=SUPLA_SD_CALL_SET_DEVICE_CONFIG,
+                    data=encode_device_config(
+                        available_fields=available_fields,
+                        fields=fields,
+                        config=config,
+                    ),
+                )
+            )
+            logger.info(
+                "sent device config fields=0x%x (%d bytes) to %s",
+                fields,
+                len(config),
+                guid_to_hex(self.guid) if self.guid else "?",
+            )
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending_device_config = None
+
+    def _abort_pending_config(self, error: BaseException) -> None:
+        """Fail anything waiting on a config result, instead of letting it hang."""
+        for future in list(self._pending_channel_config.values()):
+            if not future.done():
+                future.set_exception(error)
+        self._pending_channel_config.clear()
+        if self._pending_device_config is not None and not (
+            self._pending_device_config.done()
+        ):
+            self._pending_device_config.set_exception(error)
+        self._pending_device_config = None
 
     async def _handle_packet(self, packet: SuplaPacket) -> None:
         self._proto_version = min(packet.version, SUPLA_PROTO_VERSION)
@@ -273,9 +386,17 @@ class DeviceSession:
             return
 
         if call_id == SUPLA_DS_CALL_SET_CHANNEL_CONFIG:
-            channel_number = packet.data[0] if packet.data else 0
-            config_type = packet.data[5] if len(packet.data) > 5 else 0
-            logger.debug("device set channel config channel=%s type=%s", channel_number, config_type)
+            channel_number, func, config_type, raw = decode_channel_config(packet.data)
+            logger.debug(
+                "device set channel config channel=%s type=%s (%d bytes)",
+                channel_number,
+                config_type,
+                len(raw),
+            )
+            if self.guid is not None:
+                await self._registry.update_channel_config(
+                    self.guid, channel_number, func, config_type, raw
+                )
             await self._send(
                 make_response(
                     packet,
@@ -289,8 +410,33 @@ class DeviceSession:
             )
             return
 
+        if call_id == SUPLA_DS_CALL_SET_CHANNEL_CONFIG_RESULT:
+            result, config_type, channel_number = decode_set_channel_config_result(
+                packet.data
+            )
+            logger.debug(
+                "channel %s config result=%s type=%s", channel_number, result, config_type
+            )
+            future = self._pending_channel_config.get((channel_number, config_type))
+            if future is not None and not future.done():
+                future.set_result(result)
+            return
+
         if call_id == SUPLA_DS_CALL_SET_DEVICE_CONFIG:
-            logger.debug("device sent its config (%d bytes)", len(packet.data))
+            end_of_data, available_fields, fields, raw = decode_device_config(
+                packet.data
+            )
+            logger.debug(
+                "device sent config fields=0x%x available=0x%x (%d bytes, last=%s)",
+                fields,
+                available_fields,
+                len(raw),
+                bool(end_of_data),
+            )
+            if self.guid is not None:
+                await self._registry.update_device_config(
+                    self.guid, end_of_data, available_fields, fields, raw
+                )
             await self._send(
                 make_response(
                     packet,
@@ -298,6 +444,15 @@ class DeviceSession:
                     encode_set_device_config_result(SUPLA_CONFIG_RESULT_TRUE),
                 )
             )
+            return
+
+        if call_id == SUPLA_DS_CALL_SET_DEVICE_CONFIG_RESULT:
+            result = decode_set_device_config_result(packet.data)
+            logger.debug("device config result=%s", result)
+            if self._pending_device_config is not None and not (
+                self._pending_device_config.done()
+            ):
+                self._pending_device_config.set_result(result)
             return
 
         if call_id == SUPLA_DS_CALL_CHANNEL_SET_VALUE_RESULT:
@@ -349,7 +504,15 @@ class DeviceSession:
         function = channel.function if channel is not None else 0
 
         config = b""
-        if function == SUPLA_CHANNELFNC_ACTIONTRIGGER:
+        if (
+            channel is not None
+            and channel.config
+            and config_type == SUPLA_CONFIG_TYPE_DEFAULT
+        ):
+            # In SUPLA the server owns configuration, so hand back exactly what
+            # was last agreed with this channel.
+            config = channel.config
+        elif function == SUPLA_CHANNELFNC_ACTIONTRIGGER:
             # Enable every action the button reports so triggers reach the server.
             active_actions = channel.func_list if channel is not None else 0xFFFFFFFF
             config = struct.pack("<I", active_actions & 0xFFFFFFFF)

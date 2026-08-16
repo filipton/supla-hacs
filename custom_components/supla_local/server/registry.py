@@ -8,12 +8,24 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from . import channels
+from . import config as config_mod
+from . import consts as C
 from .protocol import DeviceChannel, RegisterDevice, guid_to_hex
 
 if TYPE_CHECKING:
     from .session import DeviceSession
 
 logger = logging.getLogger(__name__)
+
+
+class ConfigRejected(RuntimeError):
+    """The device refused a configuration write."""
+
+    def __init__(self, result: int) -> None:
+        self.result = result
+        super().__init__(
+            C.CONFIG_RESULT_NAMES.get(result, f"unknown result {result}")
+        )
 
 DeviceListener = Callable[["ConnectedDevice"], Awaitable[None] | None]
 #: (device, channel_number, action bitmask) for a button press.
@@ -46,6 +58,21 @@ class ChannelState:
     offline: int = 0
     sub_device_id: int = 0
     extended: dict[str, Any] | None = None
+    #: Raw SUPLA_CONFIG_TYPE_DEFAULT blob, exactly as last exchanged with the
+    #: device. Writes edit a copy of these bytes rather than build new ones.
+    config: bytes | None = None
+
+    @property
+    def config_spec(self) -> config_mod.ConfigSpec | None:
+        return config_mod.channel_config_spec(self.function)
+
+    @property
+    def accepts_runtime_config(self) -> bool:
+        return bool(self.flags & C.SUPLA_CHANNEL_FLAG_RUNTIME_CHANNEL_CONFIG_UPDATE)
+
+    def decoded_config(self) -> dict[str, int]:
+        spec = self.config_spec
+        return spec.decode(self.config) if spec is not None else {}
 
     @property
     def kind(self) -> str:
@@ -71,6 +98,8 @@ class ChannelState:
             "sub_device_id": self.sub_device_id,
             "value": self.decoded(),
             "extended": self.extended,
+            "config": self.decoded_config(),
+            "config_raw": self.config.hex() if self.config else None,
         }
 
 
@@ -87,7 +116,20 @@ class ConnectedDevice:
     product_id: int = 0
     proto_version: int = 0
     sub_devices: dict[int, dict[str, Any]] = field(default_factory=dict)
+    #: Raw device config blob and its bitmaps, as last reported by the device.
+    device_config: bytes = b""
+    device_config_fields: int = 0
+    device_config_available: int = 0
     session: DeviceSession | None = field(default=None, repr=False)
+
+    @property
+    def supports_device_config(self) -> bool:
+        return bool(self.flags & C.SUPLA_DEVICE_FLAG_DEVICE_CONFIG_SUPPORTED)
+
+    def decoded_device_config(self) -> dict[str, dict[str, int]]:
+        return config_mod.decode_device_config(
+            self.device_config_fields, self.device_config
+        )
 
     @property
     def guid_hex(self) -> str:
@@ -110,6 +152,9 @@ class ConnectedDevice:
             "product_id": self.product_id,
             "proto_version": self.proto_version,
             "online": self.online,
+            "device_config": self.decoded_device_config(),
+            "device_config_fields": self.device_config_fields,
+            "device_config_available": self.device_config_available,
             "sub_devices": list(self.sub_devices.values()),
             "channels": [channel.to_dict() for channel in ordered],
         }
@@ -138,6 +183,9 @@ class DeviceRegistry:
         self._lock = asyncio.Lock()
         self._listeners: list[DeviceListener] = []
         self._action_listeners: list[ActionListener] = []
+        #: Partially received device config, keyed by GUID; a device may split
+        #: its configuration over several messages.
+        self._device_config_parts: dict[str, tuple[int, bytearray]] = {}
 
     def add_listener(self, listener: DeviceListener) -> None:
         self._listeners.append(listener)
@@ -168,12 +216,15 @@ class DeviceRegistry:
             existing = self._devices.get(guid_hex)
             if existing and existing.session is not None and existing.session is not session:
                 old_session = existing.session
-            # Preserve extended values across re-registration.
+            # Preserve extended values and configuration across re-registration:
+            # the device sends neither again, but both still apply.
             if existing:
                 for number, channel in new_channels.items():
                     previous = existing.channels.get(number)
                     if previous is not None:
                         channel.extended = previous.extended
+                        if previous.function == channel.function:
+                            channel.config = previous.config
 
             device = ConnectedDevice(
                 guid=reg.guid,
@@ -187,6 +238,11 @@ class DeviceRegistry:
                 product_id=reg.product_id,
                 proto_version=proto_version,
                 sub_devices=dict(existing.sub_devices) if existing else {},
+                device_config=existing.device_config if existing else b"",
+                device_config_fields=existing.device_config_fields if existing else 0,
+                device_config_available=(
+                    existing.device_config_available if existing else 0
+                ),
                 session=session,
             )
             self._devices[guid_hex] = device
@@ -290,6 +346,145 @@ class DeviceRegistry:
             if device is None:
                 return
             device.sub_devices[int(details["sub_device_id"])] = details
+        await self._notify(device)
+
+    async def update_channel_config(
+        self,
+        guid: bytes,
+        channel_number: int,
+        function: int,
+        config_type: int,
+        raw: bytes,
+    ) -> None:
+        """Record the configuration a device says it is running."""
+        if config_type != C.SUPLA_CONFIG_TYPE_DEFAULT:
+            # Weekly schedules and the other config types are not modelled.
+            logger.debug(
+                "ignoring channel %s config of type %s", channel_number, config_type
+            )
+            return
+        async with self._lock:
+            device = self._devices.get(guid_to_hex(guid))
+            if device is None:
+                return
+            channel = device.channels.get(channel_number)
+            if channel is None:
+                return
+            channel.config = raw
+            if function and not channel.function:
+                channel.function = function
+        logger.info(
+            "channel %s reported config: %s",
+            channel_number,
+            config_mod.describe(channel.decoded_config()) or f"{len(raw)} bytes",
+        )
+        await self._notify(device)
+
+    async def update_device_config(
+        self,
+        guid: bytes,
+        end_of_data: int,
+        available_fields: int,
+        fields: int,
+        raw: bytes,
+    ) -> None:
+        """Record device-level configuration, reassembling split messages."""
+        key = guid_to_hex(guid)
+        async with self._lock:
+            device = self._devices.get(key)
+            if device is None:
+                return
+            merged_fields, buffer = self._device_config_parts.get(key, (0, bytearray()))
+            merged_fields |= fields
+            buffer.extend(raw)
+            if not end_of_data:
+                self._device_config_parts[key] = (merged_fields, buffer)
+                return
+            self._device_config_parts.pop(key, None)
+            device.device_config = bytes(buffer)
+            device.device_config_fields = merged_fields
+            device.device_config_available = available_fields
+        logger.info(
+            "device %s reported config fields 0x%x (%d bytes)",
+            key,
+            merged_fields,
+            len(device.device_config),
+        )
+        await self._notify(device)
+
+    async def write_channel_config(
+        self,
+        guid: str | bytes,
+        channel_number: int,
+        field: str,
+        value: int,
+    ) -> None:
+        """Change one channel setting and wait for the device to accept it."""
+        device = self.get(guid)
+        if device is None or device.session is None or not device.session.is_connected:
+            raise RuntimeError("device is offline")
+        channel = device.channels.get(channel_number)
+        if channel is None:
+            raise KeyError(f"channel {channel_number} not found")
+        spec = channel.config_spec
+        if spec is None:
+            raise config_mod.ConfigError(
+                f"channel {channel_number} has no configurable settings"
+            )
+
+        payload = spec.with_field(channel.config, field, value)
+        if payload == channel.config:
+            return
+        result = await device.session.send_channel_config(
+            channel_number=channel_number,
+            func=channel.function,
+            config_type=C.SUPLA_CONFIG_TYPE_DEFAULT,
+            config=payload,
+        )
+        if result != C.SUPLA_CONFIG_RESULT_TRUE:
+            raise ConfigRejected(result)
+
+        async with self._lock:
+            channel.config = payload
+        logger.info("channel %s config %s set to %s", channel_number, field, value)
+        await self._notify(device)
+
+    async def write_device_config(
+        self,
+        guid: str | bytes,
+        name: str,
+        field: str,
+        value: int,
+    ) -> None:
+        """Change one device-level setting and wait for the device to accept it."""
+        device = self.get(guid)
+        if device is None or device.session is None or not device.session.is_connected:
+            raise RuntimeError("device is offline")
+
+        entry = config_mod.DEVICE_CONFIG_BY_NAME.get(name)
+        if entry is None:
+            raise config_mod.ConfigError(f"unknown device config field {name!r}")
+        available = device.device_config_available
+        if available and not available & entry.bit:
+            raise config_mod.ConfigError(f"device does not support {name!r}")
+
+        payload, fields = config_mod.device_config_with_field(
+            device.device_config, device.device_config_fields, name, field, value
+        )
+        if payload == device.device_config and fields == device.device_config_fields:
+            return
+        result = await device.session.send_device_config(
+            available_fields=available or fields,
+            fields=fields,
+            config=payload,
+        )
+        if result != C.SUPLA_CONFIG_RESULT_TRUE:
+            raise ConfigRejected(result)
+
+        async with self._lock:
+            device.device_config = payload
+            device.device_config_fields = fields
+        logger.info("device config %s.%s set to %s", name, field, value)
         await self._notify(device)
 
     def list_devices(self) -> list[ConnectedDevice]:
