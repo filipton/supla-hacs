@@ -102,8 +102,18 @@ class SuplaConnectivitySensor(SuplaEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         device = self._device
+        session = device.session if device else None
         return {
             "guid": self._guid,
             "last_seen": self._manager.last_seen.get(self._guid),
             "protocol_version": device.proto_version if device else None,
+            # The address we see, which differs from the device-reported one
+            # when there is a NAT or a proxy in between.
+            "source_address": f"{session.peer[0]}:{session.peer[1]}"
+            if session is not None and isinstance(session.peer, tuple)
+            else None,
+            "encrypted": session.secure if session is not None else None,
+            "check_in_interval": session.activity_timeout
+            if session is not None
+            else None,
         }

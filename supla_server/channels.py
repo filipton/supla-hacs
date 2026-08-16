@@ -700,6 +700,75 @@ def normalize_command(payload: dict[str, Any]) -> dict[str, Any]:
     return command
 
 
+# TDSC_ChannelState, byte offsets from proto.h under #pragma pack(1).
+# ReceiverID and ChannelID are unused when it arrives as an extended value, so
+# everything is read by absolute offset rather than sequentially.
+_STATE_SIZE = 50
+_STATE_FIELDS: tuple[tuple[int, str, int, str], ...] = (
+    # (bit, name, offset, struct format)
+    (C.SUPLA_CHANNELSTATE_FIELD_BATTERYLEVEL, "battery_level", 26, "<B"),
+    (C.SUPLA_CHANNELSTATE_FIELD_BATTERYPOWERED, "battery_powered", 27, "<B"),
+    (C.SUPLA_CHANNELSTATE_FIELD_WIFIRSSI, "wifi_rssi", 28, "<b"),
+    (C.SUPLA_CHANNELSTATE_FIELD_WIFISIGNALSTRENGTH, "wifi_signal_strength", 29, "<B"),
+    (C.SUPLA_CHANNELSTATE_FIELD_BRIDGENODEONLINE, "bridge_node_online", 30, "<B"),
+    (
+        C.SUPLA_CHANNELSTATE_FIELD_BRIDGENODESIGNALSTRENGTH,
+        "bridge_node_signal_strength",
+        31,
+        "<B",
+    ),
+    (C.SUPLA_CHANNELSTATE_FIELD_UPTIME, "uptime", 32, "<I"),
+    (C.SUPLA_CHANNELSTATE_FIELD_CONNECTIONUPTIME, "connection_uptime", 36, "<I"),
+    (C.SUPLA_CHANNELSTATE_FIELD_BATTERYHEALTH, "battery_health", 40, "<B"),
+    (
+        C.SUPLA_CHANNELSTATE_FIELD_LASTCONNECTIONRESETCAUSE,
+        "last_connection_reset_cause",
+        41,
+        "<B",
+    ),
+    (C.SUPLA_CHANNELSTATE_FIELD_LIGHTSOURCELIFESPAN, "light_source_lifespan", 42, "<H"),
+    (C.SUPLA_CHANNELSTATE_FIELD_SWITCHCYCLECOUNT, "switch_cycle_count", 12, "<I"),
+    (C.SUPLA_CHANNELSTATE_FIELD_DEVICE_BATTERYLEVEL, "device_battery_level", 26, "<B"),
+)
+
+
+def decode_channel_state(raw: bytes) -> dict[str, Any]:
+    """TDSC_ChannelState -> only the members the device says it filled in.
+
+    The struct grew over protocol versions, so a short payload simply yields
+    fewer keys rather than an error.
+    """
+    if len(raw) < 12:
+        raise ValueError("short channel state")
+
+    fields = struct.unpack_from("<i", raw, 8)[0]
+    state: dict[str, Any] = {"channel": raw[4], "fields": fields}
+
+    if fields & C.SUPLA_CHANNELSTATE_FIELD_IPV4 and len(raw) >= 20:
+        # Carried as the four address bytes in order, so read them as octets
+        # rather than as an integer whose byte order would be a guess.
+        state["ipv4"] = ".".join(str(octet) for octet in raw[16:20])
+    if fields & C.SUPLA_CHANNELSTATE_FIELD_MAC and len(raw) >= 26:
+        state["mac"] = ":".join(f"{octet:02x}" for octet in raw[20:26])
+
+    for bit, name, offset, fmt in _STATE_FIELDS:
+        if not fields & bit:
+            continue
+        if len(raw) < offset + struct.calcsize(fmt):
+            continue
+        state[name] = struct.unpack_from(fmt, raw, offset)[0]
+
+    if "last_connection_reset_cause" in state:
+        state["last_connection_reset_cause_name"] = C.CONNECTION_RESET_CAUSE_NAMES.get(
+            state["last_connection_reset_cause"], "unknown"
+        )
+    if "battery_powered" in state:
+        state["battery_powered"] = bool(state["battery_powered"])
+    if "bridge_node_online" in state:
+        state["bridge_node_online"] = bool(state["bridge_node_online"])
+    return state
+
+
 def decode_extended_value(ev_type: int, raw: bytes) -> dict[str, Any]:
     """Decode the common extended value payloads; keep raw bytes for the rest."""
     decoded: dict[str, Any] = {"type": ev_type, "size": len(raw)}
@@ -716,6 +785,13 @@ def decode_extended_value(ev_type: int, raw: bytes) -> dict[str, Any]:
         decoded["price_per_unit"] = round(price_per_unit / 10000.0, 4)
         decoded["counter"] = counter
         decoded["calculated_value"] = round(calculated / 1000.0, 3)
+    elif ev_type in (
+        C.EV_TYPE_CHANNEL_STATE_V1,
+        C.EV_TYPE_CHANNEL_AND_TIMER_STATE_V1,
+    ):
+        # The combined value starts with the channel state; the timer half is
+        # a countdown this integration does not model.
+        decoded["state"] = decode_channel_state(raw[:_STATE_SIZE])
     else:
         decoded["raw"] = raw[:64].hex()
 

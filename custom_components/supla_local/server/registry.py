@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -116,6 +117,9 @@ class ConnectedDevice:
     product_id: int = 0
     proto_version: int = 0
     sub_devices: dict[int, dict[str, Any]] = field(default_factory=dict)
+    #: Last TDSC_ChannelState the device reported: IP, signal, uptime and so
+    #: on. Volatile, so it is never persisted.
+    state: dict[str, Any] = field(default_factory=dict)
     #: Raw device config blob and its bitmaps, as last reported by the device.
     device_config: bytes = b""
     device_config_fields: int = 0
@@ -152,6 +156,7 @@ class ConnectedDevice:
             "product_id": self.product_id,
             "proto_version": self.proto_version,
             "online": self.online,
+            "state": self.state,
             "device_config": self.decoded_device_config(),
             "device_config_fields": self.device_config_fields,
             "device_config_available": self.device_config_available,
@@ -238,6 +243,7 @@ class DeviceRegistry:
                 product_id=reg.product_id,
                 proto_version=proto_version,
                 sub_devices=dict(existing.sub_devices) if existing else {},
+                state=dict(existing.state) if existing else {},
                 device_config=existing.device_config if existing else b"",
                 device_config_fields=existing.device_config_fields if existing else 0,
                 device_config_available=(
@@ -485,6 +491,25 @@ class DeviceRegistry:
             device.device_config = payload
             device.device_config_fields = fields
         logger.info("device config %s.%s set to %s", name, field, value)
+        await self._notify(device)
+
+    async def update_device_state(self, guid: bytes, state: dict[str, Any]) -> None:
+        """Record the diagnostics a device reports about itself.
+
+        The values are per channel on the wire, but everything worth showing
+        (address, signal, uptime) describes the whole device, so the newest
+        report wins whichever channel it arrived on.
+        """
+        async with self._lock:
+            device = self._devices.get(guid_to_hex(guid))
+            if device is None:
+                return
+            merged = dict(device.state)
+            merged.update(state)
+            # Stamped on arrival so "up since" can be derived without the
+            # answer drifting every time it is read.
+            merged["received"] = time.time()
+            device.state = merged
         await self._notify(device)
 
     async def forget(self, guid: str | bytes) -> ConnectedDevice | None:

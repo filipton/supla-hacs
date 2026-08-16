@@ -322,6 +322,12 @@ class ConfigDevice:
         self._writer.close()
 
 
+@pytest.fixture
+def activity_timeout() -> int:
+    """How often the server asks devices to check in; overridden per test."""
+    return C.DEFAULT_ACTIVITY_TIMEOUT
+
+
 async def _wait_for(predicate, timeout: float = 5.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -333,9 +339,15 @@ async def _wait_for(predicate, timeout: float = 5.0) -> None:
 
 
 @pytest.fixture
-async def stack():
+async def stack(activity_timeout: int):
     registry = DeviceRegistry()
-    server = SuplaTcpServer(registry, host="127.0.0.1", port=0, tls_port=None)
+    server = SuplaTcpServer(
+        registry,
+        host="127.0.0.1",
+        port=0,
+        tls_port=None,
+        activity_timeout=activity_timeout,
+    )
     await server.start()
     port = server.servers[0].sockets[0].getsockname()[1]
     devices: list[ConfigDevice] = []
@@ -542,31 +554,32 @@ async def test_a_split_device_config_is_reassembled(stack) -> None:
 # --- detecting a device that vanished without saying goodbye ---------------
 
 
-async def test_a_silent_device_is_dropped_after_its_activity_timeout(
-    stack, monkeypatch
-) -> None:
-    """A device that loses power never sends a FIN, so silence is the signal."""
+@pytest.fixture
+def brisk(monkeypatch) -> int:
+    """A one-second check-in, so the timing tests do not take a minute."""
     from supla_server import session as session_module
 
-    # The register result carries the timeout as a byte, so keep it whole.
-    monkeypatch.setattr(session_module, "DEFAULT_ACTIVITY_TIMEOUT", 1)
-    monkeypatch.setattr(session_module, "ACTIVITY_GRACE", 0.1)
+    monkeypatch.setattr(session_module, "MIN_ACTIVITY_TIMEOUT", 1)
+    monkeypatch.setattr(session_module, "ACTIVITY_GRACE", 0.2)
+    return 1
 
+
+@pytest.mark.parametrize("activity_timeout", [1])
+async def test_a_silent_device_is_dropped_after_its_activity_timeout(
+    stack, brisk
+) -> None:
+    """A device that loses power never sends a FIN, so silence is the signal."""
     registry, connect = stack
     fake = await connect()
     assert registry.get(GUID).online
 
     # Stop reading and writing, exactly like a device whose plug was pulled.
     fake._task.cancel()
-    await _wait_for(lambda: not registry.get(GUID).online, timeout=3)
+    await _wait_for(lambda: not registry.get(GUID).online, timeout=5)
 
 
-async def test_a_device_that_keeps_talking_is_left_alone(stack, monkeypatch) -> None:
-    from supla_server import session as session_module
-
-    monkeypatch.setattr(session_module, "DEFAULT_ACTIVITY_TIMEOUT", 1)
-    monkeypatch.setattr(session_module, "ACTIVITY_GRACE", 0.2)
-
+@pytest.mark.parametrize("activity_timeout", [1])
+async def test_a_device_that_keeps_talking_is_left_alone(stack, brisk) -> None:
     registry, connect = stack
     fake = await connect()
 
@@ -576,13 +589,36 @@ async def test_a_device_that_keeps_talking_is_left_alone(stack, monkeypatch) -> 
     assert registry.get(GUID).online
 
 
-async def test_the_device_sets_the_timeout_it_wants(stack, monkeypatch) -> None:
-    from supla_server import session as session_module
-
-    monkeypatch.setattr(session_module, "MIN_ACTIVITY_TIMEOUT", 1)
+@pytest.mark.parametrize("activity_timeout", [20])
+async def test_the_server_shortens_the_interval_a_device_asks_for(stack) -> None:
+    """The device adopts whatever the server answers, so ask for less."""
     registry, connect = stack
     fake = await connect()
 
-    await fake.send(C.SUPLA_DCS_CALL_SET_ACTIVITY_TIMEOUT, bytes([30]))
-    await _wait_for(lambda: registry.get(GUID).session._activity_timeout == 30)
-    assert registry.get(GUID).session.read_timeout == 30 + session_module.ACTIVITY_GRACE
+    await fake.send(C.SUPLA_DCS_CALL_SET_ACTIVITY_TIMEOUT, bytes([120]))
+    await _wait_for(lambda: registry.get(GUID).session._activity_timeout == 20)
+
+    from supla_server import session as session_module
+
+    assert registry.get(GUID).session.read_timeout == 20 + session_module.ACTIVITY_GRACE
+
+
+@pytest.mark.parametrize("activity_timeout", [60])
+async def test_a_device_asking_for_less_than_we_want_keeps_its_own(stack) -> None:
+    registry, connect = stack
+    fake = await connect()
+
+    await fake.send(C.SUPLA_DCS_CALL_SET_ACTIVITY_TIMEOUT, bytes([15]))
+    await _wait_for(lambda: registry.get(GUID).session._activity_timeout == 15)
+
+
+@pytest.mark.parametrize("activity_timeout", [20])
+async def test_a_sleeping_device_is_not_held_to_the_short_interval(stack) -> None:
+    """A battery device is quiet on purpose and must not be dropped for it."""
+    registry, connect = stack
+    fake = await connect(flags=C.SUPLA_DEVICE_FLAG_SLEEP_MODE_ENABLED)
+
+    session = registry.get(GUID).session
+    assert session.sleeps
+    await fake.send(C.SUPLA_DCS_CALL_SET_ACTIVITY_TIMEOUT, bytes([240]))
+    await _wait_for(lambda: session._activity_timeout == 240)

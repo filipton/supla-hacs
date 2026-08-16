@@ -3,22 +3,35 @@
     "step": {
       "user": {
         "title": "SUPLA Local",
-        "description": "Home Assistant will listen for SUPLA devices itself. Point each device at {host} in its web configuration, then it appears here on its own.",
+        "description": "In each device's web configuration, set the **server address** to:\n\n## {host}\n\nPort {ports}. Any email, Location ID and AuthKey is accepted.\n\nWith SSL on, set the device's security level to **skip CA check** — the certificate is generated here and self-signed.",
+        "data": {
+          "enable_tls": "Accept TLS connections",
+          "offline_after": "Consider a device offline after (seconds)",
+          "custom_ports": "Use custom ports"
+        },
+        "data_description": {
+          "enable_tls": "Devices with SSL turned on connect on port 2016. Leave on unless every device has SSL disabled.",
+          "offline_after": "A device that loses power never closes its connection, so it is only noticed by going quiet. Lower reacts faster; 20 is the protocol's floor.",
+          "custom_ports": "Only if 2015 or 2016 is already taken on this machine."
+        }
+      },
+      "ports": {
+        "title": "SUPLA Local ports",
+        "description": "SUPLA devices look for 2015 and 2016 unless told otherwise, so only change these if something else on this machine already uses them. Each device has to be configured with the matching port.\n\nHome Assistant is reachable at **{host}**.",
         "data": {
           "tcp_port": "Plain TCP port",
-          "enable_tls": "Accept TLS connections",
           "tls_port": "TLS port"
         },
         "data_description": {
           "tcp_port": "Devices with SSL turned off connect here. SUPLA's default is 2015.",
-          "enable_tls": "Uses a self-signed certificate generated on first start, so devices must be set to skip the CA check.",
           "tls_port": "Devices with SSL turned on connect here. SUPLA's default is 2016."
         }
       }
     },
     "error": {
       "port_in_use": "Something already listens on that port. Stop the standalone SUPLA server, or pick another port.",
-      "same_port": "The plain and TLS ports must be different."
+      "same_port": "The plain and TLS ports must be different.",
+      "default_ports_in_use": "Port 2015 or 2016 is already in use on this machine. Tick “Use custom ports” to pick different ones."
     },
     "abort": {
       "single_instance_allowed": "One SUPLA Local entry serves every device, so only one can be added."
@@ -28,17 +41,35 @@
     "step": {
       "init": {
         "title": "SUPLA Local",
-        "description": "Changing a port restarts the listener. Devices are configured with a fixed address and port, so update them to match ({host}).",
+        "description": "Devices are configured with a fixed address and port, so update them to match if you change anything here.\n\n## {host}\n\nPort {ports}.",
+        "data": {
+          "enable_tls": "Accept TLS connections",
+          "offline_after": "Consider a device offline after (seconds)",
+          "custom_ports": "Use custom ports"
+        },
+        "data_description": {
+          "enable_tls": "Devices with SSL turned on connect on port 2016. Leave on unless every device has SSL disabled.",
+          "offline_after": "A device that loses power never closes its connection, so it is only noticed by going quiet. Lower reacts faster; 20 is the protocol's floor.",
+          "custom_ports": "Only if 2015 or 2016 is already taken on this machine."
+        }
+      },
+      "ports": {
+        "title": "SUPLA Local ports",
+        "description": "SUPLA devices look for 2015 and 2016 unless told otherwise, so only change these if something else on this machine already uses them. Each device has to be configured with the matching port.\n\nHome Assistant is reachable at **{host}**.",
         "data": {
           "tcp_port": "Plain TCP port",
-          "enable_tls": "Accept TLS connections",
           "tls_port": "TLS port"
+        },
+        "data_description": {
+          "tcp_port": "Devices with SSL turned off connect here. SUPLA's default is 2015.",
+          "tls_port": "Devices with SSL turned on connect here. SUPLA's default is 2016."
         }
       }
     },
     "error": {
       "port_in_use": "Something already listens on that port. Stop the standalone SUPLA server, or pick another port.",
-      "same_port": "The plain and TLS ports must be different."
+      "same_port": "The plain and TLS ports must be different.",
+      "default_ports_in_use": "Port 2015 or 2016 is already in use on this machine. Tick “Use custom ports” to pick different ones."
     }
   }
 }

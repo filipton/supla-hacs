@@ -11,10 +11,19 @@ DOMAIN: Final = "supla_local"
 CONF_TCP_PORT: Final = "tcp_port"
 CONF_ENABLE_TLS: Final = "enable_tls"
 CONF_TLS_PORT: Final = "tls_port"
+CONF_OFFLINE_AFTER: Final = "offline_after"
+#: Flow-only: whether to show the port screen. Never stored.
+CONF_CUSTOM_PORTS: Final = "custom_ports"
 
 DEFAULT_TCP_PORT: Final = C.DEFAULT_TCP_PORT
 DEFAULT_TLS_PORT: Final = C.DEFAULT_TLS_PORT
 DEFAULT_ENABLE_TLS: Final = True
+#: Seconds of silence before a device counts as gone. Devices are told to check
+#: in often enough for this to hold, so lowering it really does detect a pulled
+#: plug sooner, at the cost of a little more chatter.
+DEFAULT_OFFLINE_AFTER: Final = 30
+MIN_OFFLINE_AFTER: Final = 20
+MAX_OFFLINE_AFTER: Final = 250
 
 MANUFACTURER: Final = "SUPLA"
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -13,6 +13,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
 from . import config_map
@@ -21,9 +22,11 @@ from .const import (
     ACTION_TRIGGER_CAPS,
     CERT_DIRNAME,
     CONF_ENABLE_TLS,
+    CONF_OFFLINE_AFTER,
     CONF_TCP_PORT,
     CONF_TLS_PORT,
     DEFAULT_ENABLE_TLS,
+    DEFAULT_OFFLINE_AFTER,
     DEFAULT_TCP_PORT,
     DEFAULT_TLS_PORT,
     DOMAIN,
@@ -34,6 +37,11 @@ from .const import (
 )
 from .models import DeviceSnapshot
 from .server import protocol
+from .server.session import (
+    ACTIVITY_GRACE,
+    MAX_ACTIVITY_TIMEOUT,
+    MIN_ACTIVITY_TIMEOUT,
+)
 from .server.registry import ConnectedDevice, DeviceRegistry
 from .server.tcp_server import SuplaTcpServer
 from .server.tls import load_or_create_ssl_context
@@ -46,6 +54,10 @@ _LOGGER = logging.getLogger(__name__)
 
 #: Devices are told to connect to the Home Assistant host, so bind everywhere.
 LISTEN_HOST = "0.0.0.0"
+
+#: Diagnostics are the one thing SUPLA does not push, so they are asked for.
+#: Signal and uptime move slowly, so this is deliberately unhurried.
+STATE_REFRESH = timedelta(minutes=5)
 
 DeviceListener = Callable[[DeviceSnapshot], None]
 
@@ -68,6 +80,8 @@ class SuplaManager:
         #: unique id -> platform that owns it, so a channel can never be added
         #: twice and can move between platforms when its function changes.
         self._owners: dict[str, str] = {}
+        #: Devices already asked for diagnostics on this connection.
+        self._state_asked: set[str] = set()
 
     # --- configuration ---
 
@@ -88,6 +102,22 @@ class SuplaManager:
         if not self.tls_enabled:
             return None
         return int(self._options.get(CONF_TLS_PORT, DEFAULT_TLS_PORT))
+
+    @property
+    def offline_after(self) -> int:
+        return int(self._options.get(CONF_OFFLINE_AFTER, DEFAULT_OFFLINE_AFTER))
+
+    @property
+    def activity_timeout(self) -> int:
+        """How often devices are asked to check in.
+
+        Detection costs one check-in plus a grace period, so the interval is
+        the target minus that grace, kept inside the protocol's own range.
+        """
+        return max(
+            MIN_ACTIVITY_TIMEOUT,
+            min(MAX_ACTIVITY_TIMEOUT, int(self.offline_after - ACTIVITY_GRACE)),
+        )
 
     @property
     def bound_ports(self) -> list[int]:
@@ -127,9 +157,16 @@ class SuplaManager:
             port=self.tcp_port,
             tls_port=self.tls_port,
             ssl_context=ssl_context,
+            activity_timeout=self.activity_timeout,
         )
         await self._tcp.start()
         self.running = True
+
+        self.entry.async_on_unload(
+            async_track_time_interval(
+                self.hass, self._async_refresh_state, STATE_REFRESH
+            )
+        )
 
     async def async_stop(self) -> None:
         """Release both ports before the entry can be set up again."""
@@ -167,6 +204,7 @@ class SuplaManager:
     def _async_forget_device(self, guid: str) -> None:
         self.devices.pop(guid, None)
         self.last_seen.pop(guid, None)
+        self._state_asked.discard(guid)
         self._store.async_remove_device(guid)
         prefix = f"{guid}-"
         for unique_id in [key for key in self._owners if key.startswith(prefix)]:
@@ -238,6 +276,12 @@ class SuplaManager:
         guid = device.guid_hex
         if device.online:
             self.last_seen[guid] = dt_util.utcnow()
+            if guid not in self._state_asked:
+                # Fresh connection: ask once now, the timer takes it from here.
+                self._state_asked.add(guid)
+                self.hass.async_create_task(self._async_ask_for_state(device))
+        else:
+            self._state_asked.discard(guid)
 
         self._async_restore_config(device)
         snapshot = DeviceSnapshot.from_device(device)
@@ -315,6 +359,25 @@ class SuplaManager:
             ", ".join(channels) or "none",
         )
 
+    async def _async_refresh_state(self, _now: datetime | None = None) -> None:
+        for device in self.registry.list_devices():
+            if device.online:
+                await self._async_ask_for_state(device)
+
+    async def _async_ask_for_state(self, device: ConnectedDevice) -> None:
+        """Ask a device to report its address, signal and uptime.
+
+        Fire and forget: a device that does not implement it never answers and
+        simply gets no diagnostics entities.
+        """
+        session = device.session
+        if session is None or not session.is_connected or not device.channels:
+            return
+        try:
+            await session.request_channel_state(min(device.channels))
+        except (OSError, RuntimeError) as err:
+            _LOGGER.debug("could not ask %s for its state: %s", device.guid_hex, err)
+
     # --- Home Assistant registries ---
 
     @callback
@@ -329,6 +392,11 @@ class SuplaManager:
         registry.async_get_or_create(
             config_entry_id=self.entry.entry_id,
             identifiers={(DOMAIN, snapshot.guid)},
+            connections=(
+                {(dr.CONNECTION_NETWORK_MAC, dr.format_mac(snapshot.mac))}
+                if snapshot.mac
+                else set()
+            ),
             manufacturer=MANUFACTURER,
             name=snapshot.name or f"SUPLA {snapshot.guid[-6:]}",
             model=_model(snapshot.manufacturer_id, snapshot.product_id),

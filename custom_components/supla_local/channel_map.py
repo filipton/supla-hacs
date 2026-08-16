@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import config_map
+from . import config_map, state_map
 from .const import (
     BINARY_SENSOR,
     CLIMATE,
@@ -207,6 +207,10 @@ def device_unique_ids(device: DeviceSnapshot) -> set[str]:
     ids.update(unique_id(device.guid, key.suffix) for key in device_entity_keys(device))
     ids.update(
         unique_id(device.guid, setting.role) for setting in device_config_keys(device)
+    )
+    ids.update(
+        unique_id(device.guid, sensor.role)
+        for sensor in state_map.device_state_sensors(device)
     )
     return ids
 

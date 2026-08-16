@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -9,10 +10,16 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfTemperature
+from homeassistant.const import (
+    PERCENTAGE,
+    EntityCategory,
+    UnitOfEnergy,
+    UnitOfTemperature,
+)
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
-from . import SuplaConfigEntry
+from . import SuplaConfigEntry, state_map
 from .channel_map import (
     ROLE_CALCULATED,
     ROLE_HUMIDITY,
@@ -22,11 +29,14 @@ from .channel_map import (
     EntityKey,
     impulse_counter_meta,
     measurement_meta,
+    unique_id,
 )
 from .entity import (
     AddConfigEntryEntitiesCallback,
     SuplaChannelEntity,
+    SuplaEntity,
     async_setup_channel_platform,
+    channel_device_info,
 )
 from .manager import SuplaManager
 from .models import ChannelSnapshot, DeviceSnapshot
@@ -37,6 +47,9 @@ INVALID_TEMPERATURE = -273.0
 
 ENERGY_KEY = "total_forward_active_energy_kwh"
 
+#: How far a derived "since" instant may move before it is worth updating.
+UPTIME_DRIFT = timedelta(seconds=30)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -44,6 +57,7 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     async_setup_channel_platform(entry, SENSOR, async_add_entities, _build)
+    async_setup_device_state_platform(entry, async_add_entities)
 
 
 def _build(
@@ -218,3 +232,85 @@ class SuplaCalculatedCounterSensor(SuplaExtendedSensor):
             "price_per_unit": extended.get("price_per_unit"),
             "total_cost": extended.get("total_cost"),
         }
+
+
+class SuplaDeviceStateSensor(SuplaEntity, SensorEntity):
+    """One reading out of a device's own diagnostics report."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        manager: SuplaManager,
+        device: DeviceSnapshot,
+        sensor: state_map.StateSensor,
+    ) -> None:
+        super().__init__(manager, device)
+        self._sensor = sensor
+        self._attr_unique_id = unique_id(device.guid, sensor.role)
+        self._attr_name = sensor.label
+        self._attr_icon = sensor.icon
+        self._attr_device_info = channel_device_info(device, None)
+        self._attr_native_unit_of_measurement = sensor.unit
+        if sensor.device_class is not None:
+            self._attr_device_class = SensorDeviceClass(sensor.device_class)
+        if sensor.state_class is not None:
+            self._attr_state_class = SensorStateClass(sensor.state_class)
+        if sensor.options:
+            self._attr_options = list(sensor.options)
+        #: Held so a re-read does not nudge the answer by a second each time.
+        self._instant: datetime | None = None
+
+    @property
+    def _state(self) -> dict[str, Any]:
+        device = self._device
+        return device.state if device is not None else {}
+
+    @property
+    def available(self) -> bool:
+        device = self._device
+        return bool(
+            self._manager.running
+            and device is not None
+            and device.online
+            and self._sensor.key in device.state
+        )
+
+    @property
+    def native_value(self) -> Any:
+        state = self._state
+        value = state.get(self._sensor.key)
+        if value is None:
+            return None
+        if not self._sensor.age_in_seconds:
+            return value
+
+        # An age is turned into the instant it counts from, and only moved when
+        # it has really drifted, so the sensor does not change on every report.
+        reported_at = state.get("received")
+        if reported_at is None:
+            return self._instant
+        instant = dt_util.utc_from_timestamp(reported_at - value)
+        if self._instant is None or abs(instant - self._instant) > UPTIME_DRIFT:
+            self._instant = instant
+        return self._instant
+
+
+def async_setup_device_state_platform(
+    entry: SuplaConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
+) -> None:
+    """Add diagnostics sensors, now and as devices report new ones."""
+    manager = entry.runtime_data
+
+    def _async_add(device: DeviceSnapshot) -> None:
+        new = [
+            SuplaDeviceStateSensor(manager, device, sensor)
+            for sensor in state_map.device_state_sensors(device)
+            if manager.async_claim(unique_id(device.guid, sensor.role), SENSOR)
+        ]
+        if new:
+            async_add_entities(new)
+
+    for device in list(manager.devices.values()):
+        _async_add(device)
+    entry.async_on_unload(manager.async_add_device_listener(_async_add))

@@ -161,6 +161,11 @@ class DeviceSnapshot:
     device_config: bytes = b""
     device_config_fields: int = 0
     device_config_available: int = 0
+    #: Which TDSC_ChannelState members the device fills in. Only the bitmap is
+    #: kept; the readings themselves are live and never persisted.
+    state_fields: int = 0
+    #: Hardware address, once the device has reported one.
+    mac: str = ""
 
     def decoded_device_config(self) -> dict[str, dict[str, int]]:
         return config_mod.decode_device_config(
@@ -190,6 +195,8 @@ class DeviceSnapshot:
             device_config=device.device_config,
             device_config_fields=device.device_config_fields,
             device_config_available=device.device_config_available,
+            state_fields=int(device.state.get("fields") or 0),
+            mac=str(device.state.get("mac") or ""),
         )
 
     def merge(self, other: DeviceSnapshot) -> DeviceSnapshot:
@@ -211,7 +218,14 @@ class DeviceSnapshot:
                     config=channel.config or old.config,
                 )
             merged.append(channel)
-        return replace(other, channels=tuple(merged))
+        # Diagnostics arrive after registration, so a fresh snapshot has none.
+        # The set of reported fields only ever grows.
+        return replace(
+            other,
+            channels=tuple(merged),
+            state_fields=self.state_fields | other.state_fields,
+            mac=other.mac or self.mac,
+        )
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -226,6 +240,8 @@ class DeviceSnapshot:
             "device_config": self.device_config.hex(),
             "device_config_fields": self.device_config_fields,
             "device_config_available": self.device_config_available,
+            "state_fields": self.state_fields,
+            "mac": self.mac,
         }
 
     @classmethod
@@ -246,4 +262,6 @@ class DeviceSnapshot:
             device_config=bytes.fromhex(data.get("device_config") or ""),
             device_config_fields=int(data.get("device_config_fields") or 0),
             device_config_available=int(data.get("device_config_available") or 0),
+            state_fields=int(data.get("state_fields") or 0),
+            mac=str(data.get("mac") or ""),
         )

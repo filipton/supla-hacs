@@ -7,7 +7,7 @@ from typing import Any
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
-from . import SuplaConfigEntry, config_map
+from . import SuplaConfigEntry, config_map, state_map
 from .channel_map import device_entity_keys
 
 TO_REDACT = {"email", "location_id"}
@@ -49,6 +49,14 @@ async def async_get_config_entry_diagnostics(
                     "raw": snapshot.device_config.hex() or None,
                     "settings": [
                         setting.role for setting in config_map.device_settings(snapshot)
+                    ],
+                },
+                "device_state": {
+                    "reported_fields": snapshot.state_fields,
+                    "values": live.state if live else {},
+                    "sensors": [
+                        sensor.role
+                        for sensor in state_map.device_state_sensors(snapshot)
                     ],
                 },
                 "online": bool(live and live.online),

@@ -7,7 +7,7 @@ import logging
 import struct
 from typing import TYPE_CHECKING
 
-from .channels import decode_extended_value
+from .channels import decode_channel_state, decode_extended_value
 from .consts import (
     CHANNEL_VALUE_CHANGED_CALLS,
     DEFAULT_ACTIVITY_TIMEOUT,
@@ -20,6 +20,7 @@ from .consts import (
     SUPLA_DCS_CALL_GET_USER_LOCALTIME,
     SUPLA_DCS_CALL_GET_USER_LOCALTIME_RESULT,
     SUPLA_DCS_CALL_PING_SERVER,
+    SUPLA_CSD_CALL_GET_CHANNEL_STATE,
     SUPLA_DCS_CALL_SET_ACTIVITY_TIMEOUT,
     SUPLA_DS_CALL_ACTIONTRIGGER,
     SUPLA_DS_CALL_CHANNEL_SET_VALUE_RESULT,
@@ -31,6 +32,7 @@ from .consts import (
     SUPLA_DS_CALL_SET_DEVICE_CONFIG,
     SUPLA_DS_CALL_SET_DEVICE_CONFIG_RESULT,
     SUPLA_DS_CALL_SET_SUBDEVICE_DETAILS,
+    SUPLA_DSC_CALL_CHANNEL_STATE_RESULT,
     SUPLA_PROTO_VERSION,
     SUPLA_PROTO_VERSION_MIN,
     SUPLA_SDC_CALL_GETVERSION_RESULT,
@@ -43,6 +45,7 @@ from .consts import (
     SUPLA_SD_CALL_GET_CHANNEL_FUNCTIONS_RESULT,
     SUPLA_SD_CALL_REGISTER_DEVICE_RESULT,
     SUPLA_CONFIG_TYPE_DEFAULT,
+    SUPLA_DEVICE_FLAG_SLEEP_MODE_ENABLED,
     SUPLA_SD_CALL_CHANNEL_CONFIG_FINISHED,
     SUPLA_SD_CALL_SET_CHANNEL_CONFIG,
     SUPLA_SD_CALL_SET_CHANNEL_CONFIG_RESULT,
@@ -68,6 +71,7 @@ from .protocol import (
     encode_channel_config_finished,
     encode_channel_functions,
     encode_channel_new_value,
+    encode_channel_state_request,
     encode_device_config,
     encode_get_version_result,
     encode_packet,
@@ -99,7 +103,8 @@ CONFIG_TIMEOUT = 10.0
 MIN_ACTIVITY_TIMEOUT = 10
 MAX_ACTIVITY_TIMEOUT = 240
 #: Slack on top of the negotiated interval, to absorb jitter and slow links.
-ACTIVITY_GRACE = 15
+#: supla-server disconnects at exactly the interval, so this is already lenient.
+ACTIVITY_GRACE = 10
 
 
 class DeviceSession:
@@ -108,6 +113,7 @@ class DeviceSession:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         registry: DeviceRegistry,
+        activity_timeout: int = DEFAULT_ACTIVITY_TIMEOUT,
     ) -> None:
         self._reader = reader
         self._writer = writer
@@ -119,17 +125,37 @@ class DeviceSession:
         self._rr_counter = 1
         self.guid: bytes | None = None
         self.device: ConnectedDevice | None = None
-        self._activity_timeout = DEFAULT_ACTIVITY_TIMEOUT
+        # How often we would like the device to check in. The device proposes
+        # a value and adopts whatever the server answers, so this is the knob
+        # that decides how quickly a device that lost power is noticed.
+        self._preferred_activity_timeout = activity_timeout
+        self._activity_timeout = activity_timeout
+        self._requested_activity_timeout = activity_timeout
         # Config writes are request/response; the device answers with a result
         # code, correlated by channel number and config type.
         self._pending_channel_config: dict[tuple[int, int], asyncio.Future[int]] = {}
         self._pending_device_config: asyncio.Future[int] | None = None
         peer = writer.get_extra_info("peername")
         self.peer = peer
+        #: Whether this connection arrived on the TLS listener.
+        self.secure = writer.get_extra_info("ssl_object") is not None
 
     @property
     def is_connected(self) -> bool:
         return not self._closed and not self._writer.is_closing()
+
+    @property
+    def activity_timeout(self) -> float:
+        """The check-in interval this device was told to use."""
+        return self._activity_timeout
+
+    @property
+    def sleeps(self) -> bool:
+        """Whether the device is a battery one that is quiet on purpose."""
+        return bool(
+            self.device is not None
+            and self.device.flags & SUPLA_DEVICE_FLAG_SLEEP_MODE_ENABLED
+        )
 
     @property
     def read_timeout(self) -> float:
@@ -162,6 +188,9 @@ class DeviceSession:
                     break
         except asyncio.CancelledError:
             raise
+        except (ConnectionError, TimeoutError) as exc:
+            # Routine: a device that reconnects resets its previous socket.
+            logger.info("connection from %s ended: %s", self.peer, exc)
         except Exception:
             logger.exception("session error from %s", self.peer)
         finally:
@@ -212,6 +241,21 @@ class DeviceSession:
             channel_number,
             guid_to_hex(self.guid) if self.guid else "?",
             value.hex(),
+        )
+
+    async def request_channel_state(self, channel_number: int) -> None:
+        """Ask the device for its diagnostics.
+
+        Fire and forget: the answer arrives as CHANNEL_STATE_RESULT, and a
+        device that does not implement it simply never replies.
+        """
+        await self._send(
+            SuplaPacket(
+                version=self._proto_version,
+                rr_id=self._next_rr_id(),
+                call_id=SUPLA_CSD_CALL_GET_CHANNEL_STATE,
+                data=encode_channel_state_request(channel_number, HTTP_SENDER_ID),
+            )
         )
 
     async def send_channel_config(
@@ -333,12 +377,28 @@ class DeviceSession:
             return
 
         if call_id == SUPLA_DCS_CALL_SET_ACTIVITY_TIMEOUT:
-            requested = decode_set_activity_timeout(packet.data)
+            requested = (
+                decode_set_activity_timeout(packet.data)
+                or self._preferred_activity_timeout
+            )
+            self._requested_activity_timeout = requested
+            # The device adopts whatever comes back, so ask for the shorter of
+            # the two: checking in more often is what makes a dead device
+            # visible quickly. A battery device keeps the interval it chose.
+            wanted = (
+                requested
+                if self.sleeps
+                else min(requested, self._preferred_activity_timeout)
+            )
             timeout = max(
-                MIN_ACTIVITY_TIMEOUT,
-                min(MAX_ACTIVITY_TIMEOUT, requested or DEFAULT_ACTIVITY_TIMEOUT),
+                MIN_ACTIVITY_TIMEOUT, min(MAX_ACTIVITY_TIMEOUT, wanted)
             )
             self._activity_timeout = timeout
+            logger.debug(
+                "activity timeout: device asked for %ss, using %ss",
+                requested,
+                timeout,
+            )
             await self._send(
                 make_response(
                     packet,
@@ -393,6 +453,8 @@ class DeviceSession:
             number, ev_type, payload = decode_channel_extended_value(packet.data)
             extended = decode_extended_value(ev_type, payload)
             await self._registry.update_extended_value(self.guid, number, extended)
+            if "state" in extended:
+                await self._registry.update_device_state(self.guid, extended["state"])
             logger.debug("channel %s extended value type=%s", number, ev_type)
             return
 
@@ -401,6 +463,13 @@ class DeviceSession:
             logger.info("action trigger channel=%s actions=0x%x", number, actions)
             if self.guid is not None:
                 await self._registry.trigger_action(self.guid, number, actions)
+            return
+
+        if call_id == SUPLA_DSC_CALL_CHANNEL_STATE_RESULT:
+            state = decode_channel_state(packet.data)
+            logger.debug("channel state: %s", state)
+            if self.guid is not None:
+                await self._registry.update_device_state(self.guid, state)
             return
 
         if call_id == SUPLA_DS_CALL_SET_SUBDEVICE_DETAILS:
@@ -577,7 +646,7 @@ class DeviceSession:
                 packet,
                 SUPLA_SD_CALL_REGISTER_DEVICE_RESULT,
                 encode_register_device_result(
-                    activity_timeout=DEFAULT_ACTIVITY_TIMEOUT,
+                    activity_timeout=self._preferred_activity_timeout,
                     version=negotiated,
                     version_min=SUPLA_PROTO_VERSION_MIN,
                 ),
@@ -585,3 +654,15 @@ class DeviceSession:
             )
         )
         self.device = await self._registry.register(reg, self, negotiated)
+
+        if reg.flags & SUPLA_DEVICE_FLAG_SLEEP_MODE_ENABLED:
+            # A battery device is quiet on purpose. We cannot take back the
+            # interval it was already given, but we can stop holding it to it.
+            self._activity_timeout = max(
+                self._requested_activity_timeout, self._preferred_activity_timeout
+            )
+            logger.debug(
+                "%s sleeps, tolerating %ss of silence",
+                guid_to_hex(reg.guid),
+                self.read_timeout,
+            )

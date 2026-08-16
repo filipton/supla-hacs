@@ -58,20 +58,43 @@ installed.
 
 ## Setup
 
-The config flow asks for three things:
+The setup screen leads with the address to type into your devices, and asks
+only what usually matters:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| Plain TCP port | `2015` | Devices with SSL turned off |
 | Accept TLS connections | on | Generates a self-signed certificate on first start |
-| TLS port | `2016` | Devices with SSL turned on |
+| Consider a device offline after | `30` s | How quickly a device that lost power is noticed |
+| Use custom ports | off | Only if 2015 or 2016 is already taken on this machine |
 
-Both ports are test-bound during setup, so a clash (for example with the
-standalone `supla-server` in this repo) is reported instead of failing silently
-later. Ports can be changed afterwards from the integration's **Configure**
-button; the listener restarts in place.
+SUPLA devices look for **2015** and **2016**, so those are used unless you tick
+**Use custom ports**, which opens a second screen for them. The TLS port is
+only asked for when TLS is on. Everything is reachable again later from the
+integration's **Configure** button; the listener restarts in place.
+
+Ports are test-bound during setup, so a clash — with the standalone
+`supla-server` in this repo, for instance — is reported at once rather than
+failing quietly later, and it points you at the custom ports checkbox.
 
 The TLS key pair lives in `config/supla_local/`. Delete it to force a new one.
+
+### How a dead device is noticed
+
+A device that loses power never closes its TCP connection — no FIN is ever
+sent, so the socket sits half open and reading from it would block forever.
+SUPLA handles this with a check-in interval: the device proposes one, the
+server answers with the value it wants, and the device adopts that. Silence
+past the interval means the device is gone.
+
+The **offline after** setting is that budget. The interval devices are given is
+this value minus a 10 second grace, kept inside the protocol's 10–240 second
+range, so 30 seconds of silence is one missed check-in plus slack. Twenty
+seconds is the floor the protocol allows; lower is not possible, and lower
+values mean slightly more chatter. Battery devices that advertise sleep mode
+are exempt and keep whatever interval they asked for.
+
+For comparison, upstream `supla-server` disconnects at exactly the interval
+with no grace at all.
 
 ### Point your devices at Home Assistant
 
@@ -165,12 +188,40 @@ appear. Keep the ports off the public internet.
 | Action trigger (buttons) | `event` + a `supla_local_action_trigger` bus event |
 | Editable settings (see below) | `number`, `switch`, `select`, all diagnostic/config |
 
-Every device also gets a diagnostic **Connection** binary sensor, which stays
-readable while the rest of its entities are unavailable.
+Every device also gets diagnostic entities of its own — see below.
 
 An RGBW controller is split into two light entities on purpose: SUPLA drives the
 colour channels and the white channel with independent brightness commands and
 has no master dimmer, so a single entity would have to invent one.
+
+### Device diagnostics
+
+Devices report about themselves through SUPLA's `TDSC_ChannelState`, which the
+integration asks for when a device connects and every five minutes after that.
+It also picks up the same report when a device volunteers it unasked. As with
+settings, a sensor only appears once the device has actually reported that
+reading:
+
+| Sensor | Notes |
+| --- | --- |
+| **Connection** | On while the device holds a connection. Stays readable when everything else is unavailable, and carries the source address, whether the link is encrypted, the negotiated check-in interval, protocol version and last-seen time |
+| **IP address** | The address the device reports for itself |
+| **Wi-Fi signal** | dBm |
+| **Wi-Fi signal strength** | Percent, for devices that report it that way |
+| **Up since** | When the device last booted |
+| **Connected since** | When this connection began |
+| **Last disconnect reason** | The device's own verdict: activity timeout, Wi-Fi lost, server lost, or unknown |
+| **Battery**, **Battery health** | Battery devices only |
+
+"Up since" and "Connected since" are timestamps rather than counters, so they
+sit still instead of ticking, and they are only moved when they have really
+drifted rather than on every report.
+
+A device's **MAC address** goes onto the Home Assistant device page itself
+rather than becoming a sensor.
+
+A device that does not implement the state report simply gets none of these,
+and is never asked again beyond the usual refresh.
 
 ### Changing device settings
 

@@ -209,6 +209,12 @@ def decode_get_channel_config_request(data: bytes) -> tuple[int, int, int]:
     return channel_number, config_type, flags
 
 
+def encode_channel_state_request(channel_number: int, sender_id: int = 0) -> bytes:
+    """TCSD_ChannelStateRequest: SenderID, then a 4 byte union holding the
+    channel number in the server -> device direction."""
+    return struct.pack("<i", sender_id) + bytes([channel_number & 0xFF]) + bytes(3)
+
+
 def decode_channel_config(data: bytes) -> tuple[int, int, int, bytes]:
     """TSD_ChannelConfig -> (channel_number, func, config_type, config).
 

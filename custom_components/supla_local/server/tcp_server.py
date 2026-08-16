@@ -6,7 +6,12 @@ import asyncio
 import logging
 import ssl
 
-from .consts import DEFAULT_TCP_HOST, DEFAULT_TCP_PORT, DEFAULT_TLS_PORT
+from .consts import (
+    DEFAULT_ACTIVITY_TIMEOUT,
+    DEFAULT_TCP_HOST,
+    DEFAULT_TCP_PORT,
+    DEFAULT_TLS_PORT,
+)
 from .registry import DeviceRegistry
 from .session import DeviceSession
 
@@ -24,12 +29,14 @@ class SuplaTcpServer:
         *,
         tls_port: int | None = DEFAULT_TLS_PORT,
         ssl_context: ssl.SSLContext | None = None,
+        activity_timeout: int = DEFAULT_ACTIVITY_TIMEOUT,
     ) -> None:
         self.registry = registry
         self.host = host
         self.port = port
         self.tls_port = tls_port
         self.ssl_context = ssl_context
+        self.activity_timeout = activity_timeout
         self._servers: list[asyncio.Server] = []
         self._sessions: set[asyncio.Task[None]] = set()
 
@@ -94,7 +101,9 @@ class SuplaTcpServer:
         secure = transport_ssl is not None or ssl_obj is not None
         logger.debug("incoming %s connection from %s", "TLS" if secure else "plain", peer)
 
-        session = DeviceSession(reader, writer, self.registry)
+        session = DeviceSession(
+            reader, writer, self.registry, activity_timeout=self.activity_timeout
+        )
         task = asyncio.create_task(
             session.run(),
             name=f"supla-session-{'tls' if secure else 'tcp'}-{peer}",
