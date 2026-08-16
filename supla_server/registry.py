@@ -487,15 +487,32 @@ class DeviceRegistry:
         logger.info("device config %s.%s set to %s", name, field, value)
         await self._notify(device)
 
+    async def forget(self, guid: str | bytes) -> ConnectedDevice | None:
+        """Drop a device and hang up on it.
+
+        The device is removed before its session is closed, so the disconnect
+        does not announce a device that no longer exists. Registration is open,
+        so it comes back if it connects again.
+        """
+        key = guid_to_hex(guid) if isinstance(guid, bytes) else _normalise(guid)
+        async with self._lock:
+            device = self._devices.pop(key, None)
+            self._device_config_parts.pop(key, None)
+        if device is not None and device.session is not None:
+            logger.info("forgetting device %s", key)
+            await device.session.close()
+        return device
+
     def list_devices(self) -> list[ConnectedDevice]:
         return list(self._devices.values())
 
     def get(self, guid: str | bytes) -> ConnectedDevice | None:
-        if isinstance(guid, bytes):
-            key = guid_to_hex(guid)
-        else:
-            key = guid.replace("-", "").replace(":", "").upper()
+        key = guid_to_hex(guid) if isinstance(guid, bytes) else _normalise(guid)
         return self._devices.get(key)
+
+
+def _normalise(guid: str) -> str:
+    return guid.replace("-", "").replace(":", "").upper()
 
 
 def _channel_state(ch: DeviceChannel) -> ChannelState:

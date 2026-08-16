@@ -245,8 +245,12 @@ Recognised actions: `turn_on`, `turn_off`, `toggle_x1`…`toggle_x5`, `hold`,
   function changes moves to the right platform instead of being duplicated.
 - **Only the shape is stored.** Values are never persisted, so a restored entity
   is unavailable until its device reports rather than showing a stale reading.
-- **Devices you retire can be removed** from their Home Assistant device page,
-  once they are actually disconnected.
+- **Devices you retire can be removed** from their device page: **Settings →
+  Devices & services → SUPLA Local → the device → ⋮ → Delete**. That hangs up on
+  it and forgets its settings. Registration is open, so a device that is still
+  plugged in and pointed here registers again within seconds and comes back —
+  unplug it or point it elsewhere first. To remove everything, delete the
+  integration entry, which also deletes `.storage/supla_local`.
 - **Covers report positions the Home Assistant way.** SUPLA counts 0 as fully
   open, Home Assistant counts 0 as closed; the integration inverts both position
   and tilt in each direction. A calibrating drive reports no position at all.

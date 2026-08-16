@@ -443,19 +443,61 @@ async def test_tls_is_served_with_a_generated_certificate(
     assert (tmp_path / "supla_local" / "server.key").is_file()
 
 
-async def test_a_connected_device_cannot_be_deleted(
+async def test_deleting_a_device_forgets_it_and_hangs_up(
     hass: HomeAssistant, entry: MockConfigEntry, device: FakeDevice
 ) -> None:
-    """It would just re-register and come back a second later."""
     from custom_components.supla_local import async_remove_config_entry_device
 
-    device_entry = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, GUID_HEX)})
-    assert not await async_remove_config_entry_device(hass, entry, device_entry)
+    manager = entry.runtime_data
+    registry = dr.async_get(hass)
+    device_entry = registry.async_get_device(identifiers={(DOMAIN, GUID_HEX)})
 
-    await device.close()
-    await wait_for(lambda: not entry.runtime_data.registry.get(GUID_HEX).online)
     assert await async_remove_config_entry_device(hass, entry, device_entry)
-    assert GUID_HEX not in entry.runtime_data.devices
+
+    assert GUID_HEX not in manager.devices
+    assert manager.registry.get(GUID_HEX) is None
+    # The connection is dropped too, rather than left dangling.
+    await asyncio.wait_for(device.wait_closed(), timeout=5)
+
+
+async def test_a_deleted_device_that_reconnects_comes_back(
+    hass: HomeAssistant, entry: MockConfigEntry, port: int, device: FakeDevice
+) -> None:
+    """Registration is open, so deletion cannot keep a live device away."""
+    from custom_components.supla_local import async_remove_config_entry_device
+
+    manager = entry.runtime_data
+    device_entry = dr.async_get(hass).async_get_device(
+        identifiers={(DOMAIN, GUID_HEX)}
+    )
+    await async_remove_config_entry_device(hass, entry, device_entry)
+    assert GUID_HEX not in manager.devices
+
+    again = FakeDevice()
+    await again.connect(port)
+    try:
+        await wait_for(lambda: GUID_HEX in manager.devices)
+        entity_id = entity_id_for(hass, "switch", "1")
+        await wait_for(lambda: hass.states.get(entity_id).state != STATE_UNAVAILABLE)
+    finally:
+        await again.close()
+
+
+async def test_deleting_a_device_that_is_gone_leaves_nothing_behind(
+    hass: HomeAssistant, entry: MockConfigEntry, device: FakeDevice, hass_storage: dict
+) -> None:
+    from custom_components.supla_local import async_remove_config_entry_device
+
+    manager = entry.runtime_data
+    device_entry = dr.async_get(hass).async_get_device(
+        identifiers={(DOMAIN, GUID_HEX)}
+    )
+    await device.close()
+    await wait_for(lambda: not manager.registry.get(GUID_HEX).online)
+
+    assert await async_remove_config_entry_device(hass, entry, device_entry)
+    assert GUID_HEX not in manager.devices
+    assert manager.last_seen.get(GUID_HEX) is None
 
 
 async def test_diagnostics_describe_the_device_tree(

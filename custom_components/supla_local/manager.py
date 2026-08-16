@@ -15,6 +15,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
+from . import config_map
 from .channel_map import device_unique_ids
 from .const import (
     ACTION_TRIGGER_CAPS,
@@ -151,9 +152,19 @@ class SuplaManager:
 
         return _remove
 
+    async def async_forget(self, guid: str) -> None:
+        """Delete a device: hang up on it and forget everything we hold.
+
+        Registration is open, so a device that is still plugged in and pointed
+        at this host will register again and reappear. That is the honest
+        outcome; refusing the deletion would only hide it.
+        """
+        await self.registry.forget(guid)
+        self._async_forget_device(guid)
+        async_dispatcher_send(self.hass, SIGNAL_DEVICE_UPDATE.format(guid))
+
     @callback
-    def async_forget_device(self, guid: str) -> None:
-        """Drop a device the user deleted from the HA device page."""
+    def _async_forget_device(self, guid: str) -> None:
         self.devices.pop(guid, None)
         self.last_seen.pop(guid, None)
         self._store.async_remove_device(guid)
@@ -235,6 +246,7 @@ class SuplaManager:
             snapshot = previous.merge(snapshot)
 
         if previous != snapshot:
+            self._log_configurability(previous, snapshot)
             self.devices[guid] = snapshot
             self._store.async_update(snapshot)
             self._async_register_device(snapshot)
@@ -266,6 +278,41 @@ class SuplaManager:
         self.hass.bus.async_fire(EVENT_ACTION_TRIGGER, payload)
         async_dispatcher_send(
             self.hass, SIGNAL_ACTION_TRIGGER.format(guid, channel_number), names
+        )
+
+    @callback
+    def _log_configurability(
+        self, previous: DeviceSnapshot | None, snapshot: DeviceSnapshot
+    ) -> None:
+        """Say which settings a device offers, so an empty page is explainable.
+
+        Configuration entities only appear for what a device advertises, so
+        this is the quickest way to tell "nothing supported" apart from
+        "something went wrong".
+        """
+        if previous is not None and _configurability(previous) == _configurability(
+            snapshot
+        ):
+            return
+
+        channels = [
+            f"#{channel.number} {channel.config_spec.name}"
+            f" ({len(config_map.channel_settings(channel))} setting(s))"
+            for channel in snapshot.channels
+            if channel.accepts_runtime_config
+        ]
+        device_settings = config_map.device_settings(snapshot)
+        _LOGGER.info(
+            "%s (%s): device-level settings %s; configurable channels: %s",
+            snapshot.name or snapshot.guid,
+            snapshot.guid,
+            (
+                f"{len(device_settings)} available (fields 0x%x)"
+                % snapshot.device_config_available
+                if device_settings
+                else "not offered by this device"
+            ),
+            ", ".join(channels) or "none",
         )
 
     # --- Home Assistant registries ---
@@ -342,6 +389,17 @@ class SuplaManager:
             _LOGGER.debug("Unknown time zone %s, devices will get UTC", name)
             return
         protocol.set_default_timezone(zone)
+
+
+def _configurability(snapshot: DeviceSnapshot) -> tuple:
+    """What a device offers to configure, for change detection."""
+    return (
+        snapshot.device_config_available,
+        tuple(
+            (channel.number, channel.accepts_runtime_config)
+            for channel in snapshot.channels
+        ),
+    )
 
 
 def _model(manufacturer_id: int, product_id: int) -> str | None:

@@ -537,3 +537,52 @@ async def test_a_split_device_config_is_reassembled(stack) -> None:
     decoded = registry.get(GUID).decoded_device_config()
     assert decoded["status_led"]["status_led_type"] == cfg.STATUS_LED_ALWAYS_OFF
     assert decoded["button_volume"]["volume"] == 0x37
+
+
+# --- detecting a device that vanished without saying goodbye ---------------
+
+
+async def test_a_silent_device_is_dropped_after_its_activity_timeout(
+    stack, monkeypatch
+) -> None:
+    """A device that loses power never sends a FIN, so silence is the signal."""
+    from supla_server import session as session_module
+
+    # The register result carries the timeout as a byte, so keep it whole.
+    monkeypatch.setattr(session_module, "DEFAULT_ACTIVITY_TIMEOUT", 1)
+    monkeypatch.setattr(session_module, "ACTIVITY_GRACE", 0.1)
+
+    registry, connect = stack
+    fake = await connect()
+    assert registry.get(GUID).online
+
+    # Stop reading and writing, exactly like a device whose plug was pulled.
+    fake._task.cancel()
+    await _wait_for(lambda: not registry.get(GUID).online, timeout=3)
+
+
+async def test_a_device_that_keeps_talking_is_left_alone(stack, monkeypatch) -> None:
+    from supla_server import session as session_module
+
+    monkeypatch.setattr(session_module, "DEFAULT_ACTIVITY_TIMEOUT", 1)
+    monkeypatch.setattr(session_module, "ACTIVITY_GRACE", 0.2)
+
+    registry, connect = stack
+    fake = await connect()
+
+    for _ in range(8):
+        await fake.send(C.SUPLA_DCS_CALL_PING_SERVER, struct.pack("<qq", 0, 0))
+        await asyncio.sleep(0.3)
+    assert registry.get(GUID).online
+
+
+async def test_the_device_sets_the_timeout_it_wants(stack, monkeypatch) -> None:
+    from supla_server import session as session_module
+
+    monkeypatch.setattr(session_module, "MIN_ACTIVITY_TIMEOUT", 1)
+    registry, connect = stack
+    fake = await connect()
+
+    await fake.send(C.SUPLA_DCS_CALL_SET_ACTIVITY_TIMEOUT, bytes([30]))
+    await _wait_for(lambda: registry.get(GUID).session._activity_timeout == 30)
+    assert registry.get(GUID).session.read_timeout == 30 + session_module.ACTIVITY_GRACE

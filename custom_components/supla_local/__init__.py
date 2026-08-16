@@ -63,20 +63,22 @@ async def async_remove_entry(hass: HomeAssistant, entry: SuplaConfigEntry) -> No
 async def async_remove_config_entry_device(
     hass: HomeAssistant, entry: SuplaConfigEntry, device_entry: DeviceEntry
 ) -> bool:
-    """Let the user delete a device that is not coming back.
+    """Let the user delete a device from its Home Assistant page.
 
-    A connected device is refused: it would simply re-register and reappear.
+    Deleting a device that is still connected disconnects it and forgets its
+    settings, but registration is open, so it registers again within seconds
+    and comes back. Unplug it, or point it somewhere else, to make it stay
+    gone.
     """
     manager = entry.runtime_data
     for domain, identifier in device_entry.identifiers:
         if domain != DOMAIN:
             continue
         guid, _, sub_device = identifier.partition(":")
-        live = manager.registry.get(guid)
-        if live is not None and live.online:
-            return False
-        if not sub_device:
-            manager.async_forget_device(guid)
+        if sub_device:
+            # A sub-device is a view of its parent; the parent owns the state.
+            continue
+        await manager.async_forget(guid)
     return True
 
 

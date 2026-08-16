@@ -92,6 +92,15 @@ logger = logging.getLogger(__name__)
 #: How long to wait for a device to accept or reject a configuration write.
 CONFIG_TIMEOUT = 10.0
 
+# SUPLA devices announce how often they will speak, then ping on that interval.
+# A silent link past that means the device is gone, which is the only way to
+# notice a device that lost power: a yanked plug never sends a TCP FIN, so the
+# socket stays half open and reads would otherwise block forever.
+MIN_ACTIVITY_TIMEOUT = 10
+MAX_ACTIVITY_TIMEOUT = 240
+#: Slack on top of the negotiated interval, to absorb jitter and slow links.
+ACTIVITY_GRACE = 15
+
 
 class DeviceSession:
     def __init__(
@@ -110,6 +119,7 @@ class DeviceSession:
         self._rr_counter = 1
         self.guid: bytes | None = None
         self.device: ConnectedDevice | None = None
+        self._activity_timeout = DEFAULT_ACTIVITY_TIMEOUT
         # Config writes are request/response; the device answers with a result
         # code, correlated by channel number and config type.
         self._pending_channel_config: dict[tuple[int, int], asyncio.Future[int]] = {}
@@ -121,11 +131,26 @@ class DeviceSession:
     def is_connected(self) -> bool:
         return not self._closed and not self._writer.is_closing()
 
+    @property
+    def read_timeout(self) -> float:
+        """How long silence is tolerated before the device counts as gone."""
+        return self._activity_timeout + ACTIVITY_GRACE
+
     async def run(self) -> None:
         logger.info("device connected from %s", self.peer)
         try:
             while not self._closed:
-                chunk = await self._reader.read(4096)
+                try:
+                    chunk = await asyncio.wait_for(
+                        self._reader.read(4096), self.read_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.info(
+                        "no data from %s for %ss, assuming it is gone",
+                        guid_to_hex(self.guid) if self.guid else self.peer,
+                        self.read_timeout,
+                    )
+                    break
                 if not chunk:
                     break
                 self._buffer.extend(chunk)
@@ -309,7 +334,11 @@ class DeviceSession:
 
         if call_id == SUPLA_DCS_CALL_SET_ACTIVITY_TIMEOUT:
             requested = decode_set_activity_timeout(packet.data)
-            timeout = max(10, min(240, requested or DEFAULT_ACTIVITY_TIMEOUT))
+            timeout = max(
+                MIN_ACTIVITY_TIMEOUT,
+                min(MAX_ACTIVITY_TIMEOUT, requested or DEFAULT_ACTIVITY_TIMEOUT),
+            )
+            self._activity_timeout = timeout
             await self._send(
                 make_response(
                     packet,
