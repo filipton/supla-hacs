@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supla-hacs"
+version = "0.1.0"
+description = "Local SUPLA device server with HTTP control API (HACS-ready)"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+supla-server = "supla_server.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["supla_server*"]
+
+[tool.setuptools.package-data]
+supla_server = ["web/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
